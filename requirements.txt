@@ -1,0 +1,8 @@
+aiogram
+APScheduler
+SQLAlchemy
+asyncpg
+alembic
+python-dotenv
+greenlet
+dotenv
