@@ -27,7 +27,7 @@ from bot.admin.templates import DEFAULT_TEMPLATES, TEMPLATE_LABELS
 from bot.db.models import Flow, Membership, MembershipStatus
 from bot.repositories import flows as flow_repo
 from bot.repositories import memberships as membership_repo
-from bot.repositories.audit_log import add_audit_log
+from bot.repositories.audit_log import add_audit_log, list_audit_logs
 from bot.repositories.app_settings import get_setting, set_setting
 from bot.repositories.message_templates import get_template_by_key, upsert_template
 from bot.repositories.promos import delete_user_promos
@@ -226,7 +226,13 @@ async def _show_users_search(
 ) -> None:
     await state.set_state(UserSearchState.waiting_query)
     await callback.message.answer(
-        "Введите @username или числовой tg_id для поиска.",
+        "👤 Управление пользователями\n\n"
+        "Введите @username или tg_id участницы.\n\n"
+        "После поиска вы сможете:\n"
+        "• выдать или забрать доступ\n"
+        "• продлить участие\n"
+        "• сбросить «оплачу позже»\n"
+        "• сбросить промокод",
         reply_markup=users_search_kb(),
     )
     await callback.answer()
@@ -276,6 +282,55 @@ async def _send_shop_preview(
         f"- {free_desc} — {free_label}"
     )
 
+
+def _audit_action_label(action: str) -> str:
+    mapping = {
+        "admin_user_action": "Действие администратора",
+        "mailing_sent": "Рассылка отправлена",
+    }
+    return mapping.get(action, action)
+
+
+def _payload_action_label(action: str) -> str:
+    mapping = {
+        "grant_access": "Выдать доступ",
+        "revoke_access": "Забрать доступ",
+        "extend_7_days": "Продлить на 7 дней",
+        "reset_pay_later": "Сбросить «оплачу позже»",
+        "reset_promo": "Сбросить промокод",
+    }
+    return mapping.get(action, action)
+
+
+def _format_audit_log(entry) -> str:
+    lines: list[str] = ["--------------------------------"]
+    created_at = entry.created_at
+    if created_at is not None:
+        created_at = created_at.astimezone(timezone.utc)
+        lines.append(f"🕒 {created_at.strftime('%Y-%m-%d %H:%M')} (UTC)")
+    lines.append(f"📌 Тип: {_audit_action_label(entry.action)}")
+    payload = entry.payload or {}
+    actor_tg_id = payload.get("actor_tg_id")
+    if actor_tg_id:
+        lines.append(f"👤 Кто: tg_id {actor_tg_id}")
+    payload_action = payload.get("action")
+    if payload_action:
+        lines.append(f"🧾 Что: {_payload_action_label(payload_action)}")
+    target_tg_id = payload.get("tg_id")
+    if target_tg_id:
+        lines.append(f"🎯 Кому: tg_id {target_tg_id}")
+    details = {
+        k: v
+        for k, v in payload.items()
+        if k not in {"actor_tg_id", "action", "tg_id"}
+    }
+    if details:
+        lines.append("ℹ️ Детали:")
+        for key, value in details.items():
+            lines.append(f"- {key}: {value}")
+    lines.append("--------------------------------")
+    return "\n".join(lines)
+
 async def _get_current_or_next_flow(session: AsyncSession, now: datetime):
     flow = await _get_current_flow(session, now)
     if flow is None:
@@ -316,7 +371,19 @@ async def admin_section(
         await _show_mailings_screen(callback, session)
         return
     elif section == "audit":
-        text = "Лог действий: TODO: просмотр последних событий."
+        logs = await list_audit_logs(session, limit=50)
+        if not logs:
+            await callback.message.answer(
+                "Лог пуст.", reply_markup=back_menu_kb("admin:menu")
+            )
+            await callback.answer()
+            return
+        blocks = [_format_audit_log(entry) for entry in logs]
+        await callback.message.answer(
+            "\n".join(blocks), reply_markup=back_menu_kb("admin:menu")
+        )
+        await callback.answer()
+        return
     elif section == "menu":
         await callback.message.answer("Админ-панель:", reply_markup=_admin_keyboard())
         await callback.answer()
