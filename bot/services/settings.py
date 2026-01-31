@@ -37,3 +37,17 @@ async def get_mailings_enabled(session: AsyncSession) -> bool:
     if override is None:
         return settings.mailings_enabled
     return override.lower() == "true"
+
+
+async def get_shop_prices(session: AsyncSession) -> dict[str, int]:
+    intro = await get_setting(session, "shop_intro_price")
+    renewal = await get_setting(session, "shop_renewal_price")
+    return {
+        "intro": int(intro) if intro is not None else 2990,
+        "renewal": int(renewal) if renewal is not None else 1990,
+    }
+
+
+async def get_shop_free_label(session: AsyncSession) -> str:
+    label = await get_setting(session, "shop_free_label")
+    return label if label is not None else "Бесплатно"

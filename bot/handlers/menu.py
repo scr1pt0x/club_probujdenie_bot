@@ -14,7 +14,11 @@ from bot.services.memberships import compute_grace_end
 from bot.services.memberships import apply_pay_later
 from bot.services.payments import calculate_price_rub
 from bot.services.promos import is_promo_valid
-from bot.services.settings import get_effective_settings
+from bot.services.settings import (
+    get_effective_settings,
+    get_shop_free_label,
+    get_shop_prices,
+)
 from bot.services.texts import get_text
 from bot.access_control.service import grant_access
 from bot.db.models import Membership, MembershipStatus
@@ -29,7 +33,7 @@ class PromoCodeState(StatesGroup):
     waiting_code = State()
 
 
-@router.message(lambda m: m.text == "💳 Оплатить")
+@router.message(lambda m: m.text == "💳 Моя оплата")
 async def pay_handler(message: types.Message, session: AsyncSession) -> None:
     now = datetime.now(timezone.utc)
     user = await get_or_create_user(
@@ -44,7 +48,169 @@ async def pay_handler(message: types.Message, session: AsyncSession) -> None:
 
     price = await calculate_price_rub(session, user_id=user.id, paid_at=now)
     base_text = await get_text(session, "pay_unavailable")
-    await message.answer(f"{base_text}\nВаша цена сейчас: {price} ₽")
+    await message.answer(
+        f"Ваша персональная стоимость участия:\n{base_text}\nВаша цена сейчас: {price} ₽"
+    )
+
+
+def _format_price(value: int) -> str:
+    return f"{value:,}".replace(",", " ")
+
+
+def _shop_menu_kb(
+    prices: dict[str, int], free_label: str
+) -> types.InlineKeyboardMarkup:
+    return types.InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                types.InlineKeyboardButton(
+                    text=f"💳 Оплатить {_format_price(prices['intro'])} ₽",
+                    callback_data="shop:pay:intro",
+                )
+            ],
+            [
+                types.InlineKeyboardButton(
+                    text=f"💳 Оплатить {_format_price(prices['renewal'])} ₽",
+                    callback_data="shop:pay:renewal",
+                )
+            ],
+            [
+                types.InlineKeyboardButton(
+                    text=f"🎁 Бесплатный поток {free_label}",
+                    callback_data="shop:free",
+                )
+            ],
+        ]
+    )
+
+
+def _shop_checkout_kb(key: str, price_text: str) -> types.InlineKeyboardMarkup:
+    return types.InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                types.InlineKeyboardButton(
+                    text=f"💳 Оплатить {price_text}",
+                    callback_data=f"shop:checkout:{key}",
+                )
+            ]
+        ]
+    )
+
+
+def _shop_order_kb(order_key: str) -> types.InlineKeyboardMarkup:
+    return types.InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                types.InlineKeyboardButton(
+                    text="✅ Оформить заказ", callback_data=f"shop:order:{order_key}"
+                )
+            ]
+        ]
+    )
+
+
+@router.message(lambda m: m.text == "🛍 Тарифы")
+async def shop_handler(message: types.Message, session: AsyncSession) -> None:
+    prices = await get_shop_prices(session)
+    free_label = await get_shop_free_label(session)
+    title = await get_text(session, "shop_title")
+    intro_desc = await get_text(session, "shop_intro_desc")
+    renewal_desc = await get_text(session, "shop_renewal_desc")
+    free_desc = await get_text(session, "shop_free_desc")
+    await message.answer(
+        f"{title}\n"
+        f"- {intro_desc} — {_format_price(prices['intro'])} ₽\n"
+        f"- {renewal_desc} — {_format_price(prices['renewal'])} ₽\n"
+        f"- {free_desc} — {free_label}",
+        reply_markup=_shop_menu_kb(prices, free_label),
+    )
+
+
+@router.callback_query(lambda c: c.data == "shop:pay:intro")
+async def shop_intro_detail(callback: types.CallbackQuery, session: AsyncSession) -> None:
+    prices = await get_shop_prices(session)
+    intro_desc = await get_text(session, "shop_intro_desc")
+    flow = await get_next_paid_flow(session, datetime.now(timezone.utc))
+    flow_info = (
+        f"\nБлижайший поток: {flow.start_at.date()} → {flow.end_at.date()}"
+        if flow
+        else ""
+    )
+    await callback.message.answer(
+        f"{intro_desc} — {_format_price(prices['intro'])} ₽\n"
+        "Доступ: канал + группа\n"
+        "Длительность: 5 недель"
+        f"{flow_info}\n"
+        "Далее нажмите оплатить",
+        reply_markup=_shop_checkout_kb("intro", f"{_format_price(prices['intro'])} ₽"),
+    )
+    await callback.answer()
+
+
+@router.callback_query(lambda c: c.data == "shop:pay:renewal")
+async def shop_renewal_detail(callback: types.CallbackQuery, session: AsyncSession) -> None:
+    prices = await get_shop_prices(session)
+    renewal_desc = await get_text(session, "shop_renewal_desc")
+    flow = await get_next_paid_flow(session, datetime.now(timezone.utc))
+    flow_info = (
+        f"\nБлижайший поток: {flow.start_at.date()} → {flow.end_at.date()}"
+        if flow
+        else ""
+    )
+    await callback.message.answer(
+        f"{renewal_desc} — {_format_price(prices['renewal'])} ₽\n"
+        "Доступ: канал + группа\n"
+        "Длительность: 5 недель"
+        f"{flow_info}\n"
+        "Далее нажмите оплатить",
+        reply_markup=_shop_checkout_kb(
+            "renewal", f"{_format_price(prices['renewal'])} ₽"
+        ),
+    )
+    await callback.answer()
+
+
+@router.callback_query(lambda c: c.data == "shop:free")
+async def shop_free_detail(callback: types.CallbackQuery, session: AsyncSession) -> None:
+    free_label = await get_shop_free_label(session)
+    free_desc = await get_text(session, "shop_free_desc")
+    await callback.message.answer(
+        f"{free_desc} — {free_label}\n"
+        "Для участия используйте кнопку «🎟 Получить доступ»."
+    )
+    await callback.answer()
+
+
+@router.callback_query(lambda c: c.data == "shop:checkout:intro")
+async def shop_checkout_intro(callback: types.CallbackQuery, session: AsyncSession) -> None:
+    prices = await get_shop_prices(session)
+    await callback.message.answer(
+        f"К оплате: {_format_price(prices['intro'])} ₽",
+        reply_markup=_shop_order_kb("intro"),
+    )
+    await callback.answer()
+
+
+@router.callback_query(lambda c: c.data == "shop:checkout:renewal")
+async def shop_checkout_renewal(callback: types.CallbackQuery, session: AsyncSession) -> None:
+    prices = await get_shop_prices(session)
+    await callback.message.answer(
+        f"К оплате: {_format_price(prices['renewal'])} ₽",
+        reply_markup=_shop_order_kb("renewal"),
+    )
+    await callback.answer()
+
+
+@router.callback_query(lambda c: c.data == "shop:order:intro")
+async def shop_order_intro(callback: types.CallbackQuery, session: AsyncSession) -> None:
+    await callback.message.answer(await get_text(session, "shop_order_text"))
+    await callback.answer()
+
+
+@router.callback_query(lambda c: c.data == "shop:order:renewal")
+async def shop_order_renewal(callback: types.CallbackQuery, session: AsyncSession) -> None:
+    await callback.message.answer(await get_text(session, "shop_order_text"))
+    await callback.answer()
 
 
 @router.message(lambda m: m.text == "🎟 Получить доступ")

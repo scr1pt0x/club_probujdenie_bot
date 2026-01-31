@@ -167,3 +167,43 @@ def promo_kind_kb() -> InlineKeyboardMarkup:
     ]
     rows.extend(back_menu_kb("admin:promos").inline_keyboard)
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def shop_menu_kb() -> InlineKeyboardMarkup:
+    rows = [
+        [
+            InlineKeyboardButton(
+                text="✏️ Цена вступления", callback_data="admin:shop:edit:intro"
+            ),
+            InlineKeyboardButton(
+                text="✏️ Цена продления", callback_data="admin:shop:edit:renewal"
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text="✏️ Надпись (бесплатно)", callback_data="admin:shop:edit:free_label"
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text="📝 Тексты витрины", callback_data="admin:shop:texts"
+            ),
+            InlineKeyboardButton(
+                text="🧪 Тест витрины себе", callback_data="admin:shop:test"
+            ),
+        ],
+    ]
+    rows.extend(back_menu_kb("admin:menu").inline_keyboard)
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def shop_texts_kb() -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(text="🛍 Заголовок", callback_data="admin:text:shop_title")],
+        [InlineKeyboardButton(text="🛍 Вступление", callback_data="admin:text:shop_intro_desc")],
+        [InlineKeyboardButton(text="🛍 Продление", callback_data="admin:text:shop_renewal_desc")],
+        [InlineKeyboardButton(text="🛍 Бесплатно", callback_data="admin:text:shop_free_desc")],
+        [InlineKeyboardButton(text="🛍 Заказ", callback_data="admin:text:shop_order_text")],
+    ]
+    rows.extend(back_menu_kb("admin:shop").inline_keyboard)
+    return InlineKeyboardMarkup(inline_keyboard=rows)

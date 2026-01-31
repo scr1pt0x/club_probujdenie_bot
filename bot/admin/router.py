@@ -16,6 +16,8 @@ from bot.admin.keyboards import (
     prices_menu_kb,
     promo_kind_kb,
     promos_menu_kb,
+    shop_menu_kb,
+    shop_texts_kb,
     template_card_kb,
     templates_list_kb,
     user_card_kb,
@@ -33,7 +35,13 @@ from bot.repositories import promos as promo_repo
 from bot.repositories.users import get_or_create_user, get_user_by_id, get_user_by_tg_id, get_user_by_username
 from bot.services.mailings import send_manual_mailings
 from bot.services.memberships import compute_grace_end
-from bot.services.settings import get_effective_settings, get_mailings_enabled
+from bot.services.settings import (
+    get_effective_settings,
+    get_mailings_enabled,
+    get_shop_free_label,
+    get_shop_prices,
+)
+from bot.services.texts import get_text
 from bot.services.flows import sales_window_for_start
 from config import settings
 
@@ -70,6 +78,10 @@ class PromoCreateState(StatesGroup):
 class PromoDisableState(StatesGroup):
     waiting_code = State()
 
+
+class ShopPriceEditState(StatesGroup):
+    waiting_value = State()
+
 def _admin_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -77,10 +89,10 @@ def _admin_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="Цены и grace-период", callback_data="admin:prices")],
             [InlineKeyboardButton(text="📝 Тексты", callback_data="admin:texts")],
             [InlineKeyboardButton(text="Промо / бесплатные потоки", callback_data="admin:promos")],
+            [InlineKeyboardButton(text="🛍 Витрина", callback_data="admin:shop")],
             [InlineKeyboardButton(text="Пользователи", callback_data="admin:users")],
             [InlineKeyboardButton(text="📣 Рассылки", callback_data="admin:mailings")],
             [InlineKeyboardButton(text="Лог действий", callback_data="admin:audit")],
-            [InlineKeyboardButton(text="🧪 Тест", callback_data="admin:test")],
         ]
     )
 
@@ -97,57 +109,6 @@ async def admin_menu(message: types.Message, session: AsyncSession) -> None:
     )
     await session.commit()
     await message.answer("Админ-панель:", reply_markup=_admin_keyboard())
-
-
-async def _issue_test_free_flow(
-    callback: types.CallbackQuery, session: AsyncSession
-) -> None:
-    # TEST-ONLY: удалить перед деплоем
-    if callback.from_user.id not in settings.admin_tg_ids:
-        await callback.answer("Доступ запрещен", show_alert=True)
-        return
-
-    now = datetime.now(timezone.utc)
-    user = await get_or_create_user(
-        session=session,
-        tg_id=callback.from_user.id,
-        username=callback.from_user.username,
-        first_name=callback.from_user.first_name,
-        last_name=callback.from_user.last_name,
-        is_admin=callback.from_user.id in settings.admin_tg_ids,
-    )
-    await session.commit()
-
-    flow = await flow_repo.get_active_free_flow(session, now)
-    if flow is None:
-        flow = await flow_repo.get_next_free_flow(session, now)
-    if flow is None:
-        await callback.message.answer("Бесплатный поток не найден")
-        await callback.answer()
-        return
-
-    existing = await membership_repo.get_membership_by_flow(
-        session, user_id=user.id, flow_id=flow.id
-    )
-    if existing:
-        await callback.message.answer("Уже выдано")
-        await callback.answer()
-        return
-
-    effective = await get_effective_settings(session)
-    membership = Membership(
-        user_id=user.id,
-        flow_id=flow.id,
-        status=MembershipStatus.ACTIVE,
-        access_start_at=flow.start_at,
-        access_end_at=flow.end_at,
-        grace_end_at=compute_grace_end(flow.end_at, effective.grace_days),
-    )
-    session.add(membership)
-    await session.commit()
-    await grant_access(callback.message.bot, callback.from_user.id)
-    await callback.message.answer("✅ Тестовое участие выдано.")
-    await callback.answer()
 
 
 async def _get_template_text(session: AsyncSession, key: str) -> str:
@@ -278,6 +239,43 @@ async def _show_promos_screen(
     await callback.answer()
 
 
+async def _show_shop_screen(
+    callback: types.CallbackQuery, session: AsyncSession
+) -> None:
+    await _show_shop_screen_message(callback.message, session)
+    await callback.answer()
+
+
+async def _show_shop_screen_message(
+    message: types.Message, session: AsyncSession
+) -> None:
+    prices = await get_shop_prices(session)
+    free_label = await get_shop_free_label(session)
+    text = (
+        "Витрина:\n"
+        f"Вступление: {prices['intro']} ₽\n"
+        f"Продление: {prices['renewal']} ₽\n"
+        f"Бесплатный: {free_label}"
+    )
+    await message.answer(text, reply_markup=shop_menu_kb())
+
+
+async def _send_shop_preview(
+    message: types.Message, session: AsyncSession
+) -> None:
+    prices = await get_shop_prices(session)
+    free_label = await get_shop_free_label(session)
+    title = await get_text(session, "shop_title")
+    intro_desc = await get_text(session, "shop_intro_desc")
+    renewal_desc = await get_text(session, "shop_renewal_desc")
+    free_desc = await get_text(session, "shop_free_desc")
+    await message.answer(
+        f"{title}\n"
+        f"- {intro_desc} — {prices['intro']} ₽\n"
+        f"- {renewal_desc} — {prices['renewal']} ₽\n"
+        f"- {free_desc} — {free_label}"
+    )
+
 async def _get_current_or_next_flow(session: AsyncSession, now: datetime):
     flow = await _get_current_flow(session, now)
     if flow is None:
@@ -308,6 +306,9 @@ async def admin_section(
     elif section == "promos":
         await _show_promos_screen(callback, session)
         return
+    elif section == "shop":
+        await _show_shop_screen(callback, session)
+        return
     elif section == "users":
         await _show_users_search(callback, state)
         return
@@ -316,25 +317,6 @@ async def admin_section(
         return
     elif section == "audit":
         text = "Лог действий: TODO: просмотр последних событий."
-    elif section == "test":
-        rows = [
-            [
-                InlineKeyboardButton(
-                    text="🧪 Выдать мне участие (бесплатный поток)",
-                    callback_data="admin:test_free",
-                )
-            ],
-        ]
-        rows.extend(back_menu_kb("admin:menu").inline_keyboard)
-        await callback.message.answer(
-            "Тестовые операции:",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
-        )
-        await callback.answer()
-        return
-    elif section == "test_free":
-        await _issue_test_free_flow(callback, session)
-        return
     elif section == "menu":
         await callback.message.answer("Админ-панель:", reply_markup=_admin_keyboard())
         await callback.answer()
@@ -394,6 +376,36 @@ async def admin_section(
             await session.commit()
             await callback.message.answer(
                 f"Готово. Отправлено: текущие {sent_current}, бывшие {sent_former}."
+            )
+            await callback.answer()
+            return
+    elif section.startswith("shop:"):
+        parts = section.split(":")
+        if len(parts) == 2 and parts[1] == "texts":
+            await callback.message.answer(
+                "Тексты витрины:", reply_markup=shop_texts_kb()
+            )
+            await callback.answer()
+            return
+        if len(parts) == 2 and parts[1] == "test":
+            await _send_shop_preview(callback.message, session)
+            await callback.answer()
+            return
+        if len(parts) == 3 and parts[1] == "edit":
+            key = parts[2]
+            if key not in ("intro", "renewal", "free_label"):
+                await callback.answer("Неизвестная настройка", show_alert=True)
+                return
+            await state.set_state(ShopPriceEditState.waiting_value)
+            await state.update_data(setting_key=key)
+            prompt = (
+                "Введите надпись (например: Бесплатно)."
+                if key == "free_label"
+                else "Введите новое значение числом."
+            )
+            await callback.message.answer(
+                prompt,
+                reply_markup=back_menu_kb("admin:shop"),
             )
             await callback.answer()
             return
@@ -1030,6 +1042,44 @@ async def promo_disable_handler(
     await session.commit()
     await state.clear()
     await message.answer("✅ Промокод отключен.")
+
+
+@router.message(ShopPriceEditState.waiting_value)
+async def shop_price_edit_handler(
+    message: types.Message, session: AsyncSession, state: FSMContext
+) -> None:
+    if message.from_user.id not in settings.admin_tg_ids:
+        return
+    data = await state.get_data()
+    key = data.get("setting_key")
+    if key not in ("intro", "renewal", "free_label"):
+        await state.clear()
+        await message.answer("Настройка не найдена.")
+        return
+    if key == "free_label":
+        value = message.text.strip()
+        if not value:
+            await message.answer("Введите непустое значение.")
+            return
+        await set_setting(session, "shop_free_label", value)
+    else:
+        try:
+            value = int(message.text.strip())
+        except ValueError:
+            await message.answer("Введите целое число.")
+            return
+        if not (0 <= value <= 1_000_000):
+            await message.answer("Цена должна быть в диапазоне 0..1_000_000.")
+            return
+        mapping = {
+            "intro": "shop_intro_price",
+            "renewal": "shop_renewal_price",
+        }
+        await set_setting(session, mapping[key], str(value))
+    await session.commit()
+    await state.clear()
+    await message.answer("✅ Сохранено.")
+    await _show_shop_screen_message(message, session)
 
 
 @router.message(TemplateEditState.waiting_text)
