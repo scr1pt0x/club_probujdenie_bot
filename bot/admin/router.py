@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.access_control.service import grant_access, revoke_access
 from bot.admin.keyboards import (
+    back_menu_kb,
     flows_edit_select_kb,
     flows_menu_kb,
     mailings_menu_kb,
@@ -87,6 +88,7 @@ def _admin_keyboard() -> InlineKeyboardMarkup:
 @router.message(Command("admin"))
 async def admin_menu(message: types.Message, session: AsyncSession) -> None:
     if message.from_user.id not in settings.admin_tg_ids:
+        await message.answer("Доступ запрещен")
         return
     await add_audit_log(
         session,
@@ -282,7 +284,7 @@ async def _get_current_or_next_flow(session: AsyncSession, now: datetime):
         flow = await _get_next_flow(session, now)
     return flow
 
-@router.callback_query(lambda c: c.data.startswith("admin:"))
+@router.callback_query(lambda c: c.data and c.data.startswith("admin:"))
 async def admin_section(
     callback: types.CallbackQuery, session: AsyncSession, state: FSMContext
 ) -> None:
@@ -315,19 +317,18 @@ async def admin_section(
     elif section == "audit":
         text = "Лог действий: TODO: просмотр последних событий."
     elif section == "test":
-        text = "Тестовые операции:"
+        rows = [
+            [
+                InlineKeyboardButton(
+                    text="🧪 Выдать мне участие (бесплатный поток)",
+                    callback_data="admin:test_free",
+                )
+            ],
+        ]
+        rows.extend(back_menu_kb("admin:menu").inline_keyboard)
         await callback.message.answer(
-            text,
-            reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [
-                        InlineKeyboardButton(
-                            text="🧪 Выдать мне участие (бесплатный поток)",
-                            callback_data="admin:test_free",
-                        )
-                    ]
-                ]
-            ),
+            "Тестовые операции:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
         )
         await callback.answer()
         return
@@ -347,7 +348,10 @@ async def admin_section(
                 return
             await state.set_state(PriceEditState.waiting_value)
             await state.update_data(setting_key=key)
-            await callback.message.answer("Введите новое значение числом.")
+            await callback.message.answer(
+                "Введите новое значение числом.",
+                reply_markup=back_menu_kb("admin:prices"),
+            )
             await callback.answer()
             return
     elif section.startswith("mailings:"):
@@ -397,13 +401,17 @@ async def admin_section(
         parts = section.split(":")
         if len(parts) == 2 and parts[1] == "create":
             await state.set_state(PromoCreateState.waiting_code)
-            await callback.message.answer("Введите код промокода.")
+            await callback.message.answer(
+                "Введите код промокода.", reply_markup=back_menu_kb("admin:promos")
+            )
             await callback.answer()
             return
         if len(parts) == 2 and parts[1] == "list":
             promos = await promo_repo.list_recent_promos(session, limit=10)
             if not promos:
-                await callback.message.answer("Промокоды не найдены.")
+                await callback.message.answer(
+                    "Промокоды не найдены.", reply_markup=back_menu_kb("admin:promos")
+                )
                 await callback.answer()
                 return
             lines = []
@@ -416,12 +424,18 @@ async def admin_section(
                     f"{promo.used_count}/{limit} | "
                     f"{'active' if promo.active else 'off'} | {starts}→{ends}"
                 )
-            await callback.message.answer("Последние промокоды:\n" + "\n".join(lines))
+            await callback.message.answer(
+                "Последние промокоды:\n" + "\n".join(lines),
+                reply_markup=back_menu_kb("admin:promos"),
+            )
             await callback.answer()
             return
         if len(parts) == 2 and parts[1] == "disable":
             await state.set_state(PromoDisableState.waiting_code)
-            await callback.message.answer("Введите код промокода для отключения.")
+            await callback.message.answer(
+                "Введите код промокода для отключения.",
+                reply_markup=back_menu_kb("admin:promos"),
+            )
             await callback.answer()
             return
         if len(parts) == 3 and parts[1] == "kind":
@@ -609,7 +623,10 @@ async def admin_section(
                 return
             await state.set_state(FlowEditState.waiting_start)
             await state.update_data(flow_id=flow.id)
-            await callback.message.answer("Введите дату старта (YYYY-MM-DD).")
+            await callback.message.answer(
+                "Введите дату старта (YYYY-MM-DD).",
+                reply_markup=back_menu_kb("admin:flows"),
+            )
             await callback.answer()
             return
         if len(parts) == 2 and parts[1] == "create_paid":
@@ -713,7 +730,10 @@ async def flow_edit_start_handler(
 
     await state.update_data(start_at=start_at)
     await state.set_state(FlowEditState.waiting_end)
-    await message.answer("Введите дату окончания (YYYY-MM-DD).")
+    await message.answer(
+        "Введите дату окончания (YYYY-MM-DD).",
+        reply_markup=back_menu_kb("admin:flows"),
+    )
 
 
 @router.message(FlowEditState.waiting_end)
@@ -900,7 +920,9 @@ async def promo_create_value_handler(
         return
     await state.update_data(value_int=value)
     await state.set_state(PromoCreateState.waiting_limit)
-    await message.answer("Введите лимит (0 = безлимит).")
+    await message.answer(
+        "Введите лимит (0 = безлимит).", reply_markup=back_menu_kb("admin:promos")
+    )
 
 
 @router.message(PromoCreateState.waiting_limit)
@@ -920,7 +942,10 @@ async def promo_create_limit_handler(
     max_uses = None if value == 0 else value
     await state.update_data(max_uses=max_uses)
     await state.set_state(PromoCreateState.waiting_starts)
-    await message.answer("Дата начала (YYYY-MM-DD) или '-' чтобы пропустить.")
+    await message.answer(
+        "Дата начала (YYYY-MM-DD) или '-' чтобы пропустить.",
+        reply_markup=back_menu_kb("admin:promos"),
+    )
 
 
 @router.message(PromoCreateState.waiting_starts)
@@ -939,7 +964,10 @@ async def promo_create_starts_handler(
             return
     await state.update_data(starts_at=starts_at)
     await state.set_state(PromoCreateState.waiting_ends)
-    await message.answer("Дата окончания (YYYY-MM-DD) или '-' чтобы пропустить.")
+    await message.answer(
+        "Дата окончания (YYYY-MM-DD) или '-' чтобы пропустить.",
+        reply_markup=back_menu_kb("admin:promos"),
+    )
 
 
 @router.message(PromoCreateState.waiting_ends)
