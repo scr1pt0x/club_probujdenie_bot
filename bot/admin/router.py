@@ -13,6 +13,8 @@ from bot.admin.keyboards import (
     flows_menu_kb,
     mailings_menu_kb,
     prices_menu_kb,
+    promo_kind_kb,
+    promos_menu_kb,
     template_card_kb,
     templates_list_kb,
     user_card_kb,
@@ -25,6 +27,8 @@ from bot.repositories import memberships as membership_repo
 from bot.repositories.audit_log import add_audit_log
 from bot.repositories.app_settings import get_setting, set_setting
 from bot.repositories.message_templates import get_template_by_key, upsert_template
+from bot.repositories.promos import delete_user_promos
+from bot.repositories import promos as promo_repo
 from bot.repositories.users import get_or_create_user, get_user_by_id, get_user_by_tg_id, get_user_by_username
 from bot.services.mailings import send_manual_mailings
 from bot.services.memberships import compute_grace_end
@@ -51,6 +55,19 @@ class PriceEditState(StatesGroup):
 
 class UserSearchState(StatesGroup):
     waiting_query = State()
+
+
+class PromoCreateState(StatesGroup):
+    waiting_code = State()
+    waiting_kind = State()
+    waiting_value = State()
+    waiting_limit = State()
+    waiting_starts = State()
+    waiting_ends = State()
+
+
+class PromoDisableState(StatesGroup):
+    waiting_code = State()
 
 def _admin_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
@@ -252,6 +269,13 @@ async def _show_users_search(
     await callback.answer()
 
 
+async def _show_promos_screen(
+    callback: types.CallbackQuery, session: AsyncSession
+) -> None:
+    await callback.message.answer("Промокоды:", reply_markup=promos_menu_kb())
+    await callback.answer()
+
+
 async def _get_current_or_next_flow(session: AsyncSession, now: datetime):
     flow = await _get_current_flow(session, now)
     if flow is None:
@@ -280,7 +304,8 @@ async def admin_section(
         await callback.answer()
         return
     elif section == "promos":
-        text = "Промо / бесплатные потоки: TODO: управление промо."
+        await _show_promos_screen(callback, session)
+        return
     elif section == "users":
         await _show_users_search(callback, state)
         return
@@ -366,6 +391,53 @@ async def admin_section(
             await callback.message.answer(
                 f"Готово. Отправлено: текущие {sent_current}, бывшие {sent_former}."
             )
+            await callback.answer()
+            return
+    elif section.startswith("promos:"):
+        parts = section.split(":")
+        if len(parts) == 2 and parts[1] == "create":
+            await state.set_state(PromoCreateState.waiting_code)
+            await callback.message.answer("Введите код промокода.")
+            await callback.answer()
+            return
+        if len(parts) == 2 and parts[1] == "list":
+            promos = await promo_repo.list_recent_promos(session, limit=10)
+            if not promos:
+                await callback.message.answer("Промокоды не найдены.")
+                await callback.answer()
+                return
+            lines = []
+            for promo in promos:
+                limit = promo.max_uses if promo.max_uses is not None else "∞"
+                starts = promo.starts_at.date() if promo.starts_at else "-"
+                ends = promo.ends_at.date() if promo.ends_at else "-"
+                lines.append(
+                    f"{promo.code} | {promo.kind} | {promo.value_int} | "
+                    f"{promo.used_count}/{limit} | "
+                    f"{'active' if promo.active else 'off'} | {starts}→{ends}"
+                )
+            await callback.message.answer("Последние промокоды:\n" + "\n".join(lines))
+            await callback.answer()
+            return
+        if len(parts) == 2 and parts[1] == "disable":
+            await state.set_state(PromoDisableState.waiting_code)
+            await callback.message.answer("Введите код промокода для отключения.")
+            await callback.answer()
+            return
+        if len(parts) == 3 and parts[1] == "kind":
+            kind = parts[2]
+            if kind not in ("percent", "fixed", "free"):
+                await callback.answer("Неизвестный тип", show_alert=True)
+                return
+            await state.update_data(kind=kind)
+            if kind == "free":
+                await state.update_data(value_int=0)
+                await state.set_state(PromoCreateState.waiting_limit)
+                await callback.message.answer("Введите лимит (0 = безлимит).")
+                await callback.answer()
+                return
+            await state.set_state(PromoCreateState.waiting_value)
+            await callback.message.answer("Введите значение числами.")
             await callback.answer()
             return
     elif section.startswith("users:"):
@@ -497,6 +569,22 @@ async def admin_section(
             )
             await session.commit()
             await callback.message.answer("✅ Сброшено.")
+            await callback.answer()
+            return
+        if action == "reset_promo":
+            await delete_user_promos(session, user.id)
+            await add_audit_log(
+                session,
+                action="admin_user_action",
+                payload={
+                    "tg_id": user.tg_id,
+                    "action": "reset_promo",
+                    "actor_tg_id": callback.from_user.id,
+                },
+                actor_user_id=admin_user.id,
+            )
+            await session.commit()
+            await callback.message.answer("✅ Промокод сброшен.")
             await callback.answer()
             return
     elif section.startswith("flows:"):
@@ -775,6 +863,145 @@ async def user_search_handler(
 
     await state.clear()
     await message.answer("\n".join(lines), reply_markup=user_card_kb(user.id))
+
+
+@router.message(PromoCreateState.waiting_code)
+async def promo_create_code_handler(
+    message: types.Message, session: AsyncSession, state: FSMContext
+) -> None:
+    if message.from_user.id not in settings.admin_tg_ids:
+        return
+    code = message.text.strip().upper()
+    if not code:
+        await message.answer("Введите код промокода.")
+        return
+    existing = await promo_repo.get_promo_by_code(session, code)
+    if existing:
+        await message.answer("Промокод уже существует.")
+        return
+    await state.update_data(code=code)
+    await state.set_state(PromoCreateState.waiting_kind)
+    await message.answer("Выберите тип промокода:", reply_markup=promo_kind_kb())
+
+
+@router.message(PromoCreateState.waiting_value)
+async def promo_create_value_handler(
+    message: types.Message, session: AsyncSession, state: FSMContext
+) -> None:
+    if message.from_user.id not in settings.admin_tg_ids:
+        return
+    try:
+        value = int(message.text.strip())
+    except ValueError:
+        await message.answer("Введите число.")
+        return
+    if value < 0:
+        await message.answer("Значение не может быть отрицательным.")
+        return
+    await state.update_data(value_int=value)
+    await state.set_state(PromoCreateState.waiting_limit)
+    await message.answer("Введите лимит (0 = безлимит).")
+
+
+@router.message(PromoCreateState.waiting_limit)
+async def promo_create_limit_handler(
+    message: types.Message, session: AsyncSession, state: FSMContext
+) -> None:
+    if message.from_user.id not in settings.admin_tg_ids:
+        return
+    try:
+        value = int(message.text.strip())
+    except ValueError:
+        await message.answer("Введите число.")
+        return
+    if value < 0:
+        await message.answer("Лимит не может быть отрицательным.")
+        return
+    max_uses = None if value == 0 else value
+    await state.update_data(max_uses=max_uses)
+    await state.set_state(PromoCreateState.waiting_starts)
+    await message.answer("Дата начала (YYYY-MM-DD) или '-' чтобы пропустить.")
+
+
+@router.message(PromoCreateState.waiting_starts)
+async def promo_create_starts_handler(
+    message: types.Message, session: AsyncSession, state: FSMContext
+) -> None:
+    if message.from_user.id not in settings.admin_tg_ids:
+        return
+    raw = message.text.strip()
+    starts_at = None
+    if raw and raw not in ("-", "skip"):
+        try:
+            starts_at = datetime.strptime(raw, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        except ValueError:
+            await message.answer("Неверный формат даты. Используйте YYYY-MM-DD.")
+            return
+    await state.update_data(starts_at=starts_at)
+    await state.set_state(PromoCreateState.waiting_ends)
+    await message.answer("Дата окончания (YYYY-MM-DD) или '-' чтобы пропустить.")
+
+
+@router.message(PromoCreateState.waiting_ends)
+async def promo_create_ends_handler(
+    message: types.Message, session: AsyncSession, state: FSMContext
+) -> None:
+    if message.from_user.id not in settings.admin_tg_ids:
+        return
+    raw = message.text.strip()
+    ends_at = None
+    if raw and raw not in ("-", "skip"):
+        try:
+            ends_at = datetime.strptime(raw, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        except ValueError:
+            await message.answer("Неверный формат даты. Используйте YYYY-MM-DD.")
+            return
+
+    data = await state.get_data()
+    code = data.get("code")
+    kind = data.get("kind")
+    value_int = data.get("value_int", 0)
+    max_uses = data.get("max_uses")
+    starts_at = data.get("starts_at")
+    if not code or not kind:
+        await state.clear()
+        await message.answer("Не удалось создать промокод.")
+        return
+    if starts_at and ends_at and ends_at < starts_at:
+        await message.answer("Дата окончания должна быть позже даты начала.")
+        return
+
+    await promo_repo.create_promo_code(
+        session=session,
+        code=code,
+        kind=kind,
+        value_int=value_int,
+        max_uses=max_uses,
+        starts_at=starts_at,
+        ends_at=ends_at,
+    )
+    await session.commit()
+    await state.clear()
+    await message.answer("✅ Промокод создан.")
+
+
+@router.message(PromoDisableState.waiting_code)
+async def promo_disable_handler(
+    message: types.Message, session: AsyncSession, state: FSMContext
+) -> None:
+    if message.from_user.id not in settings.admin_tg_ids:
+        return
+    code = message.text.strip().upper()
+    if not code:
+        await message.answer("Введите код промокода.")
+        return
+    ok = await promo_repo.disable_promo(session, code)
+    if not ok:
+        await message.answer("Промокод не найден.")
+        return
+    await session.commit()
+    await state.clear()
+    await message.answer("✅ Промокод отключен.")
 
 
 @router.message(TemplateEditState.waiting_text)

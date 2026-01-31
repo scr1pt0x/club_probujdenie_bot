@@ -159,13 +159,61 @@ def user_card_kb(user_id: int) -> InlineKeyboardMarkup:
                     text="➕ Продлить на 7 дней",
                     callback_data=f"admin:users:extend7:{user_id}",
                 ),
+            ],
+            [
                 InlineKeyboardButton(
                     text="🧹 Сбросить 'оплачу позже'",
                     callback_data=f"admin:users:reset_pay_later:{user_id}",
                 ),
+                InlineKeyboardButton(
+                    text="🧹 Сбросить промокод",
+                    callback_data=f"admin:users:reset_promo:{user_id}",
+                ),
             ],
             [
                 InlineKeyboardButton(text="⬅️ Назад", callback_data="admin:users"),
+                InlineKeyboardButton(text="🏠 Меню", callback_data="admin:menu"),
+            ],
+        ]
+    )
+
+
+def promos_menu_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="➕ Создать промокод", callback_data="admin:promos:create"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📋 Список промокодов", callback_data="admin:promos:list"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🧼 Отключить промокод", callback_data="admin:promos:disable"
+                )
+            ],
+            [
+                InlineKeyboardButton(text="⬅️ Назад", callback_data="admin:menu"),
+                InlineKeyboardButton(text="🏠 Меню", callback_data="admin:menu"),
+            ],
+        ]
+    )
+
+
+def promo_kind_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="% Процент", callback_data="admin:promos:kind:percent"),
+                InlineKeyboardButton(text="Фикс", callback_data="admin:promos:kind:fixed"),
+            ],
+            [InlineKeyboardButton(text="Бесплатно", callback_data="admin:promos:kind:free")],
+            [
+                InlineKeyboardButton(text="⬅️ Назад", callback_data="admin:promos"),
                 InlineKeyboardButton(text="🏠 Меню", callback_data="admin:menu"),
             ],
         ]

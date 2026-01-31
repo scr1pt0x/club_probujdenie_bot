@@ -8,6 +8,7 @@ from bot.db.models import Payment, PaymentStatus
 from bot.repositories import flows as flow_repo
 from bot.repositories import memberships as membership_repo
 from bot.services import memberships as membership_service
+from bot.services.promos import apply_promo_to_price
 from bot.services.settings import get_effective_settings
 from config import settings
 from bot.access_control.service import grant_access
@@ -25,8 +26,10 @@ async def calculate_price_rub(
     if active_membership and membership_service.is_within_grace(
         active_membership, paid_at, effective.grace_days
     ):
-        return effective.renewal_price_rub
-    return effective.intro_price_rub
+        base_price = effective.renewal_price_rub
+    else:
+        base_price = effective.intro_price_rub
+    return await apply_promo_to_price(session, user_id, base_price)
 
 
 async def resolve_flow_for_payment(

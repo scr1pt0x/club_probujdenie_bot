@@ -1,15 +1,19 @@
 from datetime import datetime, timezone
 
 from aiogram import Router, types
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.repositories import flows as flow_repo
 from bot.repositories import memberships as membership_repo
+from bot.repositories import promos as promo_repo
 from bot.repositories.users import get_or_create_user
 from bot.services.flows import get_next_paid_flow
 from bot.services.memberships import compute_grace_end
 from bot.services.memberships import apply_pay_later
 from bot.services.payments import calculate_price_rub
+from bot.services.promos import is_promo_valid
 from bot.services.settings import get_effective_settings
 from bot.services.texts import get_text
 from bot.access_control.service import grant_access
@@ -19,6 +23,10 @@ from config import settings
 
 
 router = Router()
+
+
+class PromoCodeState(StatesGroup):
+    waiting_code = State()
 
 
 @router.message(lambda m: m.text == "💳 Оплатить")
@@ -158,3 +166,64 @@ async def schedule_handler(
 @router.message(lambda m: m.text == "ℹ️ Помощь")
 async def help_handler(message: types.Message, session: AsyncSession) -> None:
     await message.answer(await get_text(session, "help_text"))
+
+
+@router.message(lambda m: m.text == "🏷 Промокод")
+async def promo_code_handler(
+    message: types.Message, session: AsyncSession, state: FSMContext
+) -> None:
+    user = await get_or_create_user(
+        session=session,
+        tg_id=message.from_user.id,
+        username=message.from_user.username,
+        first_name=message.from_user.first_name,
+        last_name=message.from_user.last_name,
+        is_admin=message.from_user.id in settings.admin_tg_ids,
+    )
+    await session.commit()
+    await state.set_state(PromoCodeState.waiting_code)
+    await state.update_data(user_id=user.id)
+    await message.answer("Введите промокод.")
+
+
+@router.message(PromoCodeState.waiting_code)
+async def promo_code_apply_handler(
+    message: types.Message, session: AsyncSession, state: FSMContext
+) -> None:
+    code = message.text.strip().upper()
+    if not code:
+        await message.answer("Введите промокод.")
+        return
+
+    data = await state.get_data()
+    user_id = data.get("user_id")
+    if not user_id:
+        await state.clear()
+        await message.answer("Пользователь не найден.")
+        return
+
+    promo = await promo_repo.get_promo_by_code(session, code)
+    if not promo:
+        await message.answer("Промокод не найден или не активен.")
+        await state.clear()
+        return
+    now = datetime.now(timezone.utc)
+    if not is_promo_valid(promo, now):
+        await message.answer("Промокод не найден или не активен.")
+        await state.clear()
+        return
+
+    existing = await promo_repo.get_user_promo(session, user_id, code)
+    if existing:
+        await message.answer("Промокод уже применён.")
+        await state.clear()
+        return
+
+    latest = await promo_repo.get_latest_user_promo(session, user_id)
+    if latest:
+        await message.answer("Предыдущий промокод будет заменён новым.")
+
+    await promo_repo.add_user_promo(session, user_id, code)
+    await session.commit()
+    await state.clear()
+    await message.answer("✅ Промокод применен")
