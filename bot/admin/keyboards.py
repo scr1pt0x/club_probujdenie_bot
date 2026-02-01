@@ -93,21 +93,21 @@ def mailings_menu_kb(enabled: bool) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text=toggle_text, callback_data="admin:mailings:toggle")],
         [
             InlineKeyboardButton(
-                text="Бесплатный поток — за 7 дней",
+                text="Бесплатный −7",
                 callback_data="admin:mailings:run:free_end_minus_7",
             ),
             InlineKeyboardButton(
-                text="Бесплатный поток — за 3 дня",
+                text="Бесплатный −3",
                 callback_data="admin:mailings:run:free_end_minus_3",
             ),
         ],
         [
             InlineKeyboardButton(
-                text="Платный поток — за 3 дня",
+                text="Платный −3",
                 callback_data="admin:mailings:run:paid_end_minus_3",
             ),
             InlineKeyboardButton(
-                text="Платный поток — за 1 день",
+                text="Платный −1",
                 callback_data="admin:mailings:run:paid_end_minus_1",
             ),
         ],
