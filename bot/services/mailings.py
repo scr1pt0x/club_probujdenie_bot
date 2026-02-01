@@ -1,13 +1,14 @@
 import asyncio
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 
 from aiogram import Bot
 from sqlalchemy import distinct, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.admin.templates import DEFAULT_TEMPLATES
-from bot.db.models import Membership, MembershipStatus, User
+from bot.db.models import Flow, Membership, MembershipStatus, User
+from bot.repositories import flows as flow_repo
 from bot.repositories.audit_log import add_audit_log, has_action_with_key
 from bot.repositories.message_templates import get_template_by_key
 
@@ -19,6 +20,18 @@ async def _get_active_user_ids(session: AsyncSession, now: datetime) -> list[int
     result = await session.execute(
         select(distinct(Membership.user_id))
         .where(Membership.status == MembershipStatus.ACTIVE)
+        .where(Membership.access_end_at >= now)
+    )
+    return [row[0] for row in result.all()]
+
+
+async def _get_active_flow_user_ids(
+    session: AsyncSession, flow_id: int, now: datetime
+) -> list[int]:
+    result = await session.execute(
+        select(distinct(Membership.user_id))
+        .where(Membership.status == MembershipStatus.ACTIVE)
+        .where(Membership.flow_id == flow_id)
         .where(Membership.access_end_at >= now)
     )
     return [row[0] for row in result.all()]
@@ -173,3 +186,56 @@ async def send_manual_mailings(
         },
     )
     return sent_current, sent_former
+
+
+async def send_auto_end_mailings(
+    session: AsyncSession, bot: Bot, now: datetime
+) -> int:
+    today = now.date()
+    tz = now.tzinfo or timezone.utc
+    window_start = datetime.combine(today - timedelta(days=7), time.min, tz)
+    window_end = datetime.combine(today + timedelta(days=1), time.max, tz)
+    result = await session.execute(
+        select(Flow).where(Flow.end_at >= window_start, Flow.end_at <= window_end)
+    )
+    flows = list(result.scalars().all())
+    total_sent = 0
+    for flow in flows:
+        end_date = flow.end_at.date()
+        template_key: str | None = None
+        if flow.is_free:
+            if today == end_date - timedelta(days=7):
+                template_key = "free_end_minus_7"
+            elif today == end_date - timedelta(days=3):
+                template_key = "free_end_minus_3"
+        else:
+            if today == end_date - timedelta(days=3):
+                template_key = "paid_end_minus_3"
+            elif today == end_date - timedelta(days=1):
+                template_key = "paid_end_minus_1"
+
+        if not template_key:
+            continue
+
+        key = f"auto:{template_key}:{flow.id}:{today}"
+        if await has_action_with_key(session, "mailing_sent", key):
+            continue
+
+        user_ids = await _get_active_flow_user_ids(session, flow.id, now)
+        if not user_ids:
+            await add_audit_log(
+                session, action="mailing_sent", payload={"key": key, "count": 0}
+            )
+            continue
+
+        text = await _get_template_text(session, template_key)
+        sent = await _send_bulk(
+            session,
+            bot,
+            user_ids,
+            text,
+            mailing_key=key,
+            idempotent=True,
+        )
+        total_sent += sent
+    return total_sent

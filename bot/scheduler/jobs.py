@@ -10,8 +10,9 @@ from bot.repositories import flows as flow_repo
 from bot.repositories import memberships as membership_repo
 from bot.repositories import payments as payment_repo
 from bot.repositories import users as user_repo
-from bot.services.mailings import send_flow_mailings
+from bot.services.mailings import send_auto_end_mailings, send_flow_mailings
 from bot.services.payments import confirm_payment
+from bot.services.settings import get_mailings_enabled
 from bot.payments.adapter import PaymentAdapter
 
 
@@ -98,3 +99,13 @@ async def send_scheduled_mailings(session: AsyncSession, bot: Bot) -> None:
         return
     await send_flow_mailings(session, bot, flow.id, flow.start_at)
     await session.commit()
+
+
+async def auto_mailings(bot: Bot, sessionmaker) -> None:
+    async with sessionmaker() as session:
+        enabled = await get_mailings_enabled(session)
+        if not enabled:
+            return
+        now = datetime.now(timezone.utc)
+        await send_auto_end_mailings(session, bot, now)
+        await session.commit()

@@ -34,6 +34,14 @@ def setup_scheduler(bot, payment_adapter=None) -> AsyncIOScheduler:
         replace_existing=True,
     )
     scheduler.add_job(
+        lambda: jobs.auto_mailings(bot, AsyncSessionLocal),
+        "cron",
+        hour=10,
+        minute=0,
+        id="auto_mailings",
+        replace_existing=True,
+    )
+    scheduler.add_job(
         lambda: _with_session(lambda s: jobs.remove_non_renewed_on_paid_flows(s, bot)),
         "interval",
         hours=12,
