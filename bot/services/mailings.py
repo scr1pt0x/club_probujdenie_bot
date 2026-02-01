@@ -229,6 +229,25 @@ async def send_manual_mailings(
     return sent_current, sent_former
 
 
+async def send_custom_broadcast(
+    session: AsyncSession, bot: Bot, audience: str, text: str
+) -> int:
+    now = datetime.now(timezone.utc)
+    if audience == "active":
+        user_ids = await _get_active_user_ids(session, now)
+    elif audience == "former":
+        user_ids = await _get_former_user_ids(session)
+    elif audience == "all":
+        active_ids = await _get_active_user_ids(session, now)
+        former_ids = await _get_former_user_ids(session)
+        user_ids = list({*active_ids, *former_ids})
+    else:
+        return 0
+    return await _send_bulk(
+        session, bot, user_ids, text, mailing_key=None, idempotent=False
+    )
+
+
 async def send_auto_end_mailings(
     session: AsyncSession, bot: Bot, now: datetime
 ) -> int:

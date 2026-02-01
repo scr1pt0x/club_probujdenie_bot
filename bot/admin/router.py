@@ -33,7 +33,7 @@ from bot.repositories.message_templates import get_template_by_key, upsert_templ
 from bot.repositories.promos import delete_user_promos
 from bot.repositories import promos as promo_repo
 from bot.repositories.users import get_or_create_user, get_user_by_id, get_user_by_tg_id, get_user_by_username
-from bot.services.mailings import send_manual_mailings
+from bot.services.mailings import send_custom_broadcast, send_manual_mailings
 from bot.services.memberships import compute_grace_end
 from bot.services.settings import (
     get_effective_settings,
@@ -81,6 +81,10 @@ class PromoDisableState(StatesGroup):
 
 class ShopPriceEditState(StatesGroup):
     waiting_value = State()
+
+
+class CustomMailingState(StatesGroup):
+    waiting_text = State()
 
 def _admin_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
@@ -219,6 +223,24 @@ async def _show_mailings_screen(
     text = f"Рассылки: {status} ({source})"
     await callback.message.answer(text, reply_markup=mailings_menu_kb(enabled))
     await callback.answer()
+
+
+def _mailings_custom_audience_kb() -> InlineKeyboardMarkup:
+    rows = [
+        [
+            InlineKeyboardButton(
+                text="👥 Всем", callback_data="admin:mailings:custom:all"
+            ),
+            InlineKeyboardButton(
+                text="✅ Текущим", callback_data="admin:mailings:custom:active"
+            ),
+            InlineKeyboardButton(
+                text="🕓 Бывшим", callback_data="admin:mailings:custom:former"
+            ),
+        ],
+    ]
+    rows.extend(back_menu_kb("admin:mailings").inline_keyboard)
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 async def _show_users_search(
@@ -415,11 +437,28 @@ async def admin_section(
             await session.commit()
             await _show_mailings_screen(callback, session)
             return
+        if len(parts) == 2 and parts[1] == "custom":
+            await callback.message.answer(
+                "Выберите аудиторию:", reply_markup=_mailings_custom_audience_kb()
+            )
+            await callback.answer()
+            return
+        if len(parts) == 3 and parts[1] == "custom":
+            audience = parts[2]
+            if audience not in ("all", "active", "former"):
+                await callback.answer("Неизвестная аудитория", show_alert=True)
+                return
+            await state.set_state(CustomMailingState.waiting_text)
+            await state.update_data(audience=audience)
+            await callback.message.answer(
+                "Введите текст рассылки одним сообщением.",
+                reply_markup=back_menu_kb("admin:mailings"),
+            )
+            await callback.answer()
+            return
         if len(parts) == 3 and parts[1] == "test":
             mode = parts[2]
             if mode not in (
-                "minus_7",
-                "minus_3",
                 "free_end_minus_7",
                 "free_end_minus_3",
                 "paid_end_minus_3",
@@ -427,22 +466,13 @@ async def admin_section(
             ):
                 await callback.answer("Неизвестный режим", show_alert=True)
                 return
-            key = (
-                "reminder_minus_7"
-                if mode == "minus_7"
-                else "reminder_minus_3"
-                if mode == "minus_3"
-                else mode
-            )
-            text = await get_text(session, key)
+            text = await get_text(session, mode)
             await callback.message.answer(text)
             await callback.answer("Тест отправлен")
             return
         if len(parts) == 3 and parts[1] == "run":
             mode = parts[2]
             if mode not in (
-                "minus_7",
-                "minus_3",
                 "free_end_minus_7",
                 "free_end_minus_3",
                 "paid_end_minus_3",
@@ -1129,6 +1159,35 @@ async def promo_disable_handler(
     await session.commit()
     await state.clear()
     await message.answer("✅ Промокод отключен.")
+
+
+@router.message(CustomMailingState.waiting_text)
+async def custom_mailing_text_handler(
+    message: types.Message, session: AsyncSession, state: FSMContext
+) -> None:
+    if message.from_user.id not in settings.admin_tg_ids:
+        return
+    data = await state.get_data()
+    audience = data.get("audience")
+    if audience not in ("all", "active", "former"):
+        await state.clear()
+        await message.answer("Аудитория не найдена.")
+        return
+    text = (message.text or "").strip()
+    if not text:
+        await message.answer("Введите текст рассылки одним сообщением.")
+        return
+    enabled = await get_mailings_enabled(session)
+    if not enabled:
+        await state.clear()
+        await message.answer("⛔ Рассылки выключены. Включите в админке.")
+        return
+    sent = await send_custom_broadcast(session, message.bot, audience, text)
+    await session.commit()
+    await state.clear()
+    await message.answer(
+        f"Готово. Отправлено: {sent}", reply_markup=back_menu_kb("admin:mailings")
+    )
 
 
 @router.message(ShopPriceEditState.waiting_value)
