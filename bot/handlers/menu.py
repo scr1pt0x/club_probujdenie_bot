@@ -282,7 +282,8 @@ async def pay_later_menu_handler(
         await message.answer(text)
         return
     unavailable_text = await get_text(session, "pay_later_unavailable")
-    await message.answer(f"{unavailable_text}\n{text}")
+    reason = text.replace("Опция недоступна: ", "")
+    await message.answer(f"{unavailable_text} ({reason})")
 
 
 @router.message(lambda m: m.text == "📅 Расписание")
