@@ -456,20 +456,6 @@ async def admin_section(
             )
             await callback.answer()
             return
-        if len(parts) == 3 and parts[1] == "test":
-            mode = parts[2]
-            if mode not in (
-                "free_end_minus_7",
-                "free_end_minus_3",
-                "paid_end_minus_3",
-                "paid_end_minus_1",
-            ):
-                await callback.answer("Неизвестный режим", show_alert=True)
-                return
-            text = await get_text(session, mode)
-            await callback.message.answer(text)
-            await callback.answer("Тест отправлен")
-            return
         if len(parts) == 3 and parts[1] == "run":
             mode = parts[2]
             if mode not in (
