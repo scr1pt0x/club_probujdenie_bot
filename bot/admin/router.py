@@ -417,17 +417,37 @@ async def admin_section(
             return
         if len(parts) == 3 and parts[1] == "test":
             mode = parts[2]
-            if mode not in ("minus_7", "minus_3"):
+            if mode not in (
+                "minus_7",
+                "minus_3",
+                "free_end_minus_7",
+                "free_end_minus_3",
+                "paid_end_minus_3",
+                "paid_end_minus_1",
+            ):
                 await callback.answer("Неизвестный режим", show_alert=True)
                 return
-            key = "reminder_minus_7" if mode == "minus_7" else "reminder_minus_3"
-            text = await _get_template_text(session, key)
+            key = (
+                "reminder_minus_7"
+                if mode == "minus_7"
+                else "reminder_minus_3"
+                if mode == "minus_3"
+                else mode
+            )
+            text = await get_text(session, key)
             await callback.message.answer(text)
             await callback.answer("Тест отправлен")
             return
         if len(parts) == 3 and parts[1] == "run":
             mode = parts[2]
-            if mode not in ("minus_7", "minus_3"):
+            if mode not in (
+                "minus_7",
+                "minus_3",
+                "free_end_minus_7",
+                "free_end_minus_3",
+                "paid_end_minus_3",
+                "paid_end_minus_1",
+            ):
                 await callback.answer("Неизвестный режим", show_alert=True)
                 return
             enabled = await get_mailings_enabled(session)

@@ -11,6 +11,7 @@ from bot.db.models import Flow, Membership, MembershipStatus, User
 from bot.repositories import flows as flow_repo
 from bot.repositories.audit_log import add_audit_log, has_action_with_key
 from bot.repositories.message_templates import get_template_by_key
+from bot.services.texts import get_text
 
 
 logger = logging.getLogger(__name__)
@@ -145,6 +146,46 @@ async def send_manual_mailings(
 
     sent_current = 0
     sent_former = 0
+    if mode in (
+        "free_end_minus_7",
+        "free_end_minus_3",
+        "paid_end_minus_3",
+        "paid_end_minus_1",
+    ):
+        delta_map = {
+            "free_end_minus_7": 7,
+            "free_end_minus_3": 3,
+            "paid_end_minus_3": 3,
+            "paid_end_minus_1": 1,
+        }
+        target_date = (now.date() + timedelta(days=delta_map[mode]))
+        tz = now.tzinfo or timezone.utc
+        window_start = datetime.combine(target_date, time.min, tz)
+        window_end = datetime.combine(target_date, time.max, tz)
+        is_free = mode.startswith("free_")
+        result = await session.execute(
+            select(Flow).where(
+                Flow.is_free.is_(is_free),
+                Flow.end_at >= window_start,
+                Flow.end_at <= window_end,
+            )
+        )
+        flows = list(result.scalars().all())
+        text = await get_text(session, mode)
+        for flow in flows:
+            user_ids = await _get_active_flow_user_ids(session, flow.id, now)
+            if not user_ids:
+                continue
+            sent_current += await _send_bulk(
+                session,
+                bot,
+                user_ids,
+                text,
+                mailing_key=None,
+                idempotent=False,
+            )
+        sent_former = 0
+        return sent_current, sent_former
     if mode == "minus_7":
         current_text = await _get_template_text(session, "paid_transition_minus_7")
         former_text = await _get_template_text(session, "reminder_minus_7")

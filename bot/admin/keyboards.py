@@ -107,6 +107,46 @@ def mailings_menu_kb(enabled: bool) -> InlineKeyboardMarkup:
                 text="🚀 Запустить -3 (всем)", callback_data="admin:mailings:run:minus_3"
             ),
         ],
+        [
+            InlineKeyboardButton(
+                text="🧪 FREE конец -7 (тест себе)",
+                callback_data="admin:mailings:test:free_end_minus_7",
+            ),
+            InlineKeyboardButton(
+                text="🧪 FREE конец -3 (тест себе)",
+                callback_data="admin:mailings:test:free_end_minus_3",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text="🚀 FREE конец -7 (всем)",
+                callback_data="admin:mailings:run:free_end_minus_7",
+            ),
+            InlineKeyboardButton(
+                text="🚀 FREE конец -3 (всем)",
+                callback_data="admin:mailings:run:free_end_minus_3",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text="🧪 PAID конец -3 (тест себе)",
+                callback_data="admin:mailings:test:paid_end_minus_3",
+            ),
+            InlineKeyboardButton(
+                text="🧪 PAID конец -1 (тест себе)",
+                callback_data="admin:mailings:test:paid_end_minus_1",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text="🚀 PAID конец -3 (всем)",
+                callback_data="admin:mailings:run:paid_end_minus_3",
+            ),
+            InlineKeyboardButton(
+                text="🚀 PAID конец -1 (всем)",
+                callback_data="admin:mailings:run:paid_end_minus_1",
+            ),
+        ],
     ]
     rows.extend(back_menu_kb("admin:menu").inline_keyboard)
     return InlineKeyboardMarkup(inline_keyboard=rows)
