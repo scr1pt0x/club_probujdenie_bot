@@ -131,7 +131,9 @@ class Payment(Base):
         ForeignKey("flows.id"), nullable=True
     )
     provider: Mapped[str] = mapped_column(String(64))
-    external_id: Mapped[str] = mapped_column(String(128), unique=True)
+    external_id: Mapped[Optional[str]] = mapped_column(
+        String(128), unique=True, nullable=True
+    )
     status: Mapped[str] = mapped_column(
         Enum(
             PaymentStatus.PENDING,

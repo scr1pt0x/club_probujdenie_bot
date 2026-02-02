@@ -63,7 +63,7 @@ async def pay_handler(message: types.Message, session: AsyncSession) -> None:
         currency="RUB",
     )
     session.add(payment)
-    await session.commit()
+    await session.flush()
 
     adapter = YooKassaAdapter()
     description = "Оплата участия в Клубе Пробуждение"
