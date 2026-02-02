@@ -39,6 +39,14 @@ class Settings:
     # Scheduler
     scheduler_timezone: str = _get_env("SCHEDULER_TZ", "UTC")
 
+    # YooKassa
+    yookassa_shop_id: str = _get_env("YOO_KASSA_SHOP_ID")
+    yookassa_secret_key: str = _get_env("YOO_KASSA_SECRET_KEY")
+    yookassa_webhook_secret: str = _get_env("YOO_KASSA_WEBHOOK_SECRET", "")
+    public_base_url: str = _get_env(
+        "PUBLIC_BASE_URL", "https://club-probujdenie.ru"
+    )
+
     def __post_init__(self):
         admin_ids_raw = _get_env("ADMIN_TG_IDS", "")
         admin_ids = []

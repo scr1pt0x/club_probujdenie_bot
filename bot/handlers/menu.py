@@ -13,6 +13,7 @@ from bot.services.flows import get_next_paid_flow
 from bot.services.memberships import compute_grace_end
 from bot.services.memberships import apply_pay_later
 from bot.services.payments import calculate_price_rub
+from bot.payments.yookassa_adapter import YooKassaAdapter
 from bot.services.promos import is_promo_valid
 from bot.services.settings import (
     get_effective_settings,
@@ -21,7 +22,7 @@ from bot.services.settings import (
 )
 from bot.services.texts import get_text
 from bot.access_control.service import grant_access
-from bot.db.models import Membership, MembershipStatus
+from bot.db.models import Membership, MembershipStatus, Payment, PaymentStatus
 from config import settings
 
 
@@ -47,9 +48,52 @@ async def pay_handler(message: types.Message, session: AsyncSession) -> None:
     await session.commit()
 
     price = await calculate_price_rub(session, user_id=user.id, paid_at=now)
-    base_text = await get_text(session, "pay_unavailable")
+    if price <= 0:
+        base_text = await get_text(session, "pay_unavailable")
+        await message.answer(
+            f"Ваша персональная стоимость участия:\n{base_text}\nВаша цена сейчас: {price} ₽"
+        )
+        return
+
+    payment = Payment(
+        user_id=user.id,
+        provider="yookassa",
+        status=PaymentStatus.PENDING,
+        amount_rub=price,
+        currency="RUB",
+    )
+    session.add(payment)
+    await session.commit()
+
+    adapter = YooKassaAdapter()
+    description = "Оплата участия в Клубе Пробуждение"
+    try:
+        payment_id, confirmation_url = await adapter.create_payment(
+            amount_rub=price,
+            description=description,
+            metadata={"user_id": user.id, "internal_payment_id": payment.id},
+            internal_payment_id=payment.id,
+        )
+        payment.external_id = payment_id
+        await session.commit()
+    except Exception:
+        payment.status = PaymentStatus.FAILED
+        await session.commit()
+        await message.answer("Ошибка создания платежа. Попробуйте позже.")
+        return
+
+    keyboard = types.InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                types.InlineKeyboardButton(
+                    text="🔗 Оплатить", url=confirmation_url
+                )
+            ]
+        ]
+    )
     await message.answer(
-        f"Ваша персональная стоимость участия:\n{base_text}\nВаша цена сейчас: {price} ₽"
+        f"Ваша персональная стоимость участия: {price} ₽",
+        reply_markup=keyboard,
     )
 
 
