@@ -41,6 +41,23 @@ async def resolve_flow_for_payment(
     return flow.id if flow else None
 
 
+async def resolve_early_full_payment_flow(
+    session: AsyncSession, payment: Payment, paid_at: datetime
+) -> int | None:
+    effective = await get_effective_settings(session)
+    if payment.amount_rub != effective.intro_price_rub:
+        return None
+
+    next_free_flow = await flow_repo.get_next_free_flow(session, paid_at)
+    if next_free_flow is None:
+        return None
+    if paid_at >= next_free_flow.start_at:
+        return None
+
+    next_paid_flow = await flow_repo.get_next_paid_flow(session, paid_at)
+    return next_paid_flow.id if next_paid_flow else None
+
+
 async def confirm_payment(
     session: AsyncSession, bot: Bot, payment: Payment, paid_at: datetime | None = None
 ) -> None:
@@ -49,7 +66,10 @@ async def confirm_payment(
         return
 
     paid_at = paid_at or datetime.now(timezone.utc)
-    flow_id = payment.flow_id or await resolve_flow_for_payment(session, paid_at)
+    early_flow_id = await resolve_early_full_payment_flow(session, payment, paid_at)
+    flow_id = payment.flow_id or early_flow_id or await resolve_flow_for_payment(
+        session, paid_at
+    )
     if flow_id is None:
         # Критично: нельзя помечать PAID без привязки к потоку.
         payment.status = PaymentStatus.NEEDS_REVIEW
@@ -71,11 +91,12 @@ async def confirm_payment(
             extra={"payment_id": payment.id, "flow_id": flow_id},
         )
         return
+    access_start_at = paid_at if early_flow_id else flow.start_at
     membership = await membership_service.upsert_membership_for_flow(
         session=session,
         user_id=payment.user_id,
         flow_id=flow_id,
-        access_start_at=flow.start_at,
+        access_start_at=access_start_at,
         access_end_at=flow.end_at,
         payment=payment,
     )
