@@ -34,23 +34,24 @@ class PromoCodeState(StatesGroup):
     waiting_code = State()
 
 
-@router.message(lambda m: m.text == "💳 Моя оплата")
-async def pay_handler(message: types.Message, session: AsyncSession) -> None:
+async def _send_personal_payment_link(
+    session: AsyncSession, tg_user: types.User, responder: types.Message
+) -> None:
     now = datetime.now(timezone.utc)
     user = await get_or_create_user(
         session=session,
-        tg_id=message.from_user.id,
-        username=message.from_user.username,
-        first_name=message.from_user.first_name,
-        last_name=message.from_user.last_name,
-        is_admin=message.from_user.id in settings.admin_tg_ids,
+        tg_id=tg_user.id,
+        username=tg_user.username,
+        first_name=tg_user.first_name,
+        last_name=tg_user.last_name,
+        is_admin=tg_user.id in settings.admin_tg_ids,
     )
     await session.commit()
 
     price = await calculate_price_rub(session, user_id=user.id, paid_at=now)
     if price <= 0:
         base_text = await get_text(session, "pay_unavailable")
-        await message.answer(
+        await responder.answer(
             f"Ваша персональная стоимость участия:\n{base_text}\nВаша цена сейчас: {price} ₽"
         )
         return
@@ -79,22 +80,23 @@ async def pay_handler(message: types.Message, session: AsyncSession) -> None:
     except Exception:
         payment.status = PaymentStatus.FAILED
         await session.commit()
-        await message.answer("Ошибка создания платежа. Попробуйте позже.")
+        await responder.answer("Ошибка создания платежа. Попробуйте позже.")
         return
 
     keyboard = types.InlineKeyboardMarkup(
         inline_keyboard=[
-            [
-                types.InlineKeyboardButton(
-                    text="🔗 Оплатить", url=confirmation_url
-                )
-            ]
+            [types.InlineKeyboardButton(text="🔗 Оплатить", url=confirmation_url)]
         ]
     )
-    await message.answer(
+    await responder.answer(
         f"Ваша персональная стоимость участия: {price} ₽",
         reply_markup=keyboard,
     )
+
+
+@router.message(lambda m: m.text == "💳 Моя оплата")
+async def pay_handler(message: types.Message, session: AsyncSession) -> None:
+    await _send_personal_payment_link(session, message.from_user, message)
 
 
 def _format_price(value: int) -> str:
@@ -247,13 +249,13 @@ async def shop_checkout_renewal(callback: types.CallbackQuery, session: AsyncSes
 
 @router.callback_query(lambda c: c.data == "shop:order:intro")
 async def shop_order_intro(callback: types.CallbackQuery, session: AsyncSession) -> None:
-    await callback.message.answer(await get_text(session, "shop_order_text"))
+    await _send_personal_payment_link(session, callback.from_user, callback.message)
     await callback.answer()
 
 
 @router.callback_query(lambda c: c.data == "shop:order:renewal")
 async def shop_order_renewal(callback: types.CallbackQuery, session: AsyncSession) -> None:
-    await callback.message.answer(await get_text(session, "shop_order_text"))
+    await _send_personal_payment_link(session, callback.from_user, callback.message)
     await callback.answer()
 
 
