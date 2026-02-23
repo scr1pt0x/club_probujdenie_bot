@@ -312,15 +312,24 @@ async def access_handler(message: types.Message, session: AsyncSession) -> None:
         return
 
     effective = await get_effective_settings(session)
-    membership = Membership(
-        user_id=user.id,
-        flow_id=flow.id,
-        status=MembershipStatus.ACTIVE,
-        access_start_at=flow.start_at,
-        access_end_at=flow.end_at,
-        grace_end_at=compute_grace_end(flow.end_at, effective.grace_days),
-    )
-    session.add(membership)
+    if existing:
+        membership = existing
+        membership.status = MembershipStatus.ACTIVE
+        membership.access_start_at = flow.start_at
+        membership.access_end_at = flow.end_at
+        membership.grace_end_at = compute_grace_end(flow.end_at, effective.grace_days)
+        membership.pay_later_used_at = None
+        membership.pay_later_deadline_at = None
+    else:
+        membership = Membership(
+            user_id=user.id,
+            flow_id=flow.id,
+            status=MembershipStatus.ACTIVE,
+            access_start_at=flow.start_at,
+            access_end_at=flow.end_at,
+            grace_end_at=compute_grace_end(flow.end_at, effective.grace_days),
+        )
+        session.add(membership)
     await session.commit()
     links = await grant_access(message.bot, message.from_user.id)
     text = await get_text(session, "access_granted_free")
