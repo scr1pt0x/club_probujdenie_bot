@@ -9,6 +9,7 @@ from aiogram import Bot, Dispatcher
 import uvicorn
 
 from bot.admin.router import router as admin_router
+from bot.handlers.join_requests import router as join_requests_router
 from bot.handlers.membership import router as membership_router
 from bot.handlers.menu import router as menu_router
 from bot.handlers.start import router as start_router
@@ -34,8 +35,10 @@ async def main() -> None:
     dp = Dispatcher()
     dp.message.middleware(DbSessionMiddleware())
     dp.callback_query.middleware(DbSessionMiddleware())
+    dp.chat_join_request.middleware(DbSessionMiddleware())
 
     dp.include_router(start_router)
+    dp.include_router(join_requests_router)
     dp.include_router(membership_router)
     dp.include_router(menu_router)
     dp.include_router(admin_router)

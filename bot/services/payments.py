@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 import logging
 
-from aiogram import Bot
+from aiogram import Bot, types
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.db.models import Payment, PaymentStatus
@@ -16,6 +16,23 @@ from bot.repositories import users as user_repo
 
 
 logger = logging.getLogger(__name__)
+
+
+def _access_links_kb(
+    channel_link: str | None, group_link: str | None
+) -> types.InlineKeyboardMarkup | None:
+    rows: list[list[types.InlineKeyboardButton]] = []
+    if channel_link:
+        rows.append(
+            [types.InlineKeyboardButton(text="📢 Войти в канал", url=channel_link)]
+        )
+    if group_link:
+        rows.append(
+            [types.InlineKeyboardButton(text="💬 Войти в группу", url=group_link)]
+        )
+    if not rows:
+        return None
+    return types.InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 async def calculate_price_rub(
@@ -103,7 +120,20 @@ async def confirm_payment(
 
     user = await user_repo.get_user_by_id(session, payment.user_id)
     if user:
-        await grant_access(bot, user.tg_id)
+        links = await grant_access(bot, user.tg_id)
+        kb = _access_links_kb(links.get("channel_link"), links.get("group_link"))
+        if kb is not None:
+            try:
+                await bot.send_message(
+                    user.tg_id,
+                    "Оплата подтверждена. Нажмите кнопки и отправьте заявку на вступление.",
+                    reply_markup=kb,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to send access links after payment",
+                    extra={"user_id": payment.user_id, "payment_id": payment.id},
+                )
     if membership.pay_later_deadline_at:
         membership.pay_later_deadline_at = None
         membership.pay_later_used_at = None
@@ -141,7 +171,20 @@ async def manual_confirm_payment(
 
     user = await user_repo.get_user_by_id(session, payment.user_id)
     if user:
-        await grant_access(bot, user.tg_id)
+        links = await grant_access(bot, user.tg_id)
+        kb = _access_links_kb(links.get("channel_link"), links.get("group_link"))
+        if kb is not None:
+            try:
+                await bot.send_message(
+                    user.tg_id,
+                    "Оплата подтверждена. Нажмите кнопки и отправьте заявку на вступление.",
+                    reply_markup=kb,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to send access links after manual payment",
+                    extra={"user_id": payment.user_id, "payment_id": payment.id},
+                )
     if membership.pay_later_deadline_at:
         membership.pay_later_deadline_at = None
         membership.pay_later_used_at = None

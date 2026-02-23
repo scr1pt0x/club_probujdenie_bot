@@ -155,6 +155,21 @@ def _shop_order_kb(order_key: str) -> types.InlineKeyboardMarkup:
     )
 
 
+def _access_links_kb(channel_link: str | None, group_link: str | None) -> types.InlineKeyboardMarkup | None:
+    rows: list[list[types.InlineKeyboardButton]] = []
+    if channel_link:
+        rows.append(
+            [types.InlineKeyboardButton(text="📢 Войти в канал", url=channel_link)]
+        )
+    if group_link:
+        rows.append(
+            [types.InlineKeyboardButton(text="💬 Войти в группу", url=group_link)]
+        )
+    if not rows:
+        return None
+    return types.InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 @router.message(lambda m: m.text == "🛍 Тарифы")
 async def shop_handler(message: types.Message, session: AsyncSession) -> None:
     prices = await get_shop_prices(session)
@@ -303,8 +318,16 @@ async def access_handler(message: types.Message, session: AsyncSession) -> None:
     )
     session.add(membership)
     await session.commit()
-    await grant_access(message.bot, message.from_user.id)
-    await message.answer(await get_text(session, "access_granted_free"))
+    links = await grant_access(message.bot, message.from_user.id)
+    text = await get_text(session, "access_granted_free")
+    kb = _access_links_kb(links.get("channel_link"), links.get("group_link"))
+    if kb is None:
+        await message.answer(text)
+        return
+    await message.answer(
+        f"{text}\n\nНажмите кнопки ниже и отправьте заявку на вступление.",
+        reply_markup=kb,
+    )
 
 
 @router.message(lambda m: m.text == "⏳ Оплачу позже")
