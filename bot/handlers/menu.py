@@ -303,7 +303,11 @@ async def access_handler(message: types.Message, session: AsyncSession) -> None:
     existing = await membership_repo.get_membership_by_flow(
         session, user_id=user.id, flow_id=flow.id
     )
-    if existing:
+    if (
+        existing
+        and existing.status == MembershipStatus.ACTIVE
+        and existing.access_end_at >= now
+    ):
         await message.answer(await get_text(session, "access_already_in"))
         return
 
