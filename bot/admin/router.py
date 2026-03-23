@@ -463,6 +463,10 @@ async def admin_section(
                 "free_end_minus_3",
                 "paid_end_minus_3",
                 "paid_end_minus_1",
+                    "free_start_minus_7",
+                    "free_start_minus_3",
+                    "paid_start_minus_7",
+                    "paid_start_minus_3",
             ):
                 await callback.answer("Неизвестный режим", show_alert=True)
                 return

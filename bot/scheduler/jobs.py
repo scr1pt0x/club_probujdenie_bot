@@ -1,4 +1,6 @@
-from datetime import datetime, timezone
+import logging
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from aiogram import Bot
 from sqlalchemy import select
@@ -14,6 +16,9 @@ from bot.services.mailings import send_auto_end_mailings, send_flow_mailings
 from bot.services.payments import confirm_payment
 from bot.services.settings import get_mailings_enabled
 from bot.payments.adapter import PaymentAdapter
+from config import settings
+
+logger = logging.getLogger(__name__)
 
 
 async def expire_memberships(session: AsyncSession, bot: Bot) -> None:
@@ -93,11 +98,46 @@ async def check_pending_payments(
 
 
 async def send_scheduled_mailings(session: AsyncSession, bot: Bot) -> None:
-    now = datetime.now(timezone.utc)
-    flow = await flow_repo.get_flow_in_sales_window(session, now)
-    if not flow:
-        return
-    await send_flow_mailings(session, bot, flow.id, flow.start_at)
+    now_utc = datetime.now(timezone.utc)
+    tz = ZoneInfo(settings.scheduler_timezone)
+    now_local_date = now_utc.astimezone(tz).date()
+    target_dates = {
+        now_local_date + timedelta(days=7),
+        now_local_date + timedelta(days=3),
+    }
+
+    enabled = await get_mailings_enabled(session)
+    flows = await flow_repo.list_flows(session)
+    matched_flows = []
+    for flow in flows:
+        flow_start_local_date = flow.start_at.astimezone(tz).date()
+        if flow_start_local_date not in target_dates:
+            continue
+
+        matched_flows.append(flow)
+    matched_flows_meta = [
+        {
+            "id": f.id,
+            "start_at": f.start_at.isoformat(),
+            "end_at": f.end_at.isoformat(),
+            "is_free": f.is_free,
+        }
+        for f in matched_flows
+    ]
+
+    logger.info(
+        "Scheduled start mailings tick",
+        extra={
+            "enabled": enabled,
+            "tz": settings.scheduler_timezone,
+            "now_local_date": str(now_local_date),
+            "target_dates_local": [str(d) for d in target_dates],
+            "matched_flows": matched_flows_meta,
+        },
+    )
+
+    for flow in matched_flows:
+        await send_flow_mailings(session, bot, flow.id, flow.start_at)
     await session.commit()
 
 
@@ -107,5 +147,16 @@ async def auto_mailings(bot: Bot, sessionmaker) -> None:
         if not enabled:
             return
         now = datetime.now(timezone.utc)
+        tz = ZoneInfo(settings.scheduler_timezone)
+        now_local_date = now.astimezone(tz).date()
+        logger.info(
+            "Auto end mailings tick",
+            extra={
+                "enabled": enabled,
+                "tz": settings.scheduler_timezone,
+                "now_local_date": str(now_local_date),
+                "now_utc": now.isoformat(),
+            },
+        )
         await send_auto_end_mailings(session, bot, now)
         await session.commit()

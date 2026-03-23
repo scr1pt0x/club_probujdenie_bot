@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from datetime import datetime, time, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from aiogram import Bot
 from sqlalchemy import distinct, func, select
@@ -12,6 +13,8 @@ from bot.repositories import flows as flow_repo
 from bot.repositories.audit_log import add_audit_log, has_action_with_key
 from bot.repositories.message_templates import get_template_by_key
 from bot.services.texts import get_text
+from config import settings
+from bot.services.settings import get_mailings_enabled
 
 
 logger = logging.getLogger(__name__)
@@ -101,14 +104,19 @@ async def _get_template_text(session: AsyncSession, key: str) -> str:
 
 async def send_flow_mailings(
     session: AsyncSession, bot: Bot, flow_id: int, flow_start: datetime
-) -> None:
-    now = datetime.now(flow_start.tzinfo)
-    days_before = (flow_start.date() - now.date()).days
+) -> tuple[int, int]:
+    tz = ZoneInfo(settings.scheduler_timezone)
+    now_utc = datetime.now(timezone.utc)
+    enabled = await get_mailings_enabled(session)
+    now_local_date = now_utc.astimezone(tz).date()
+    flow_start_local_date = flow_start.astimezone(tz).date()
+    days_before = (flow_start_local_date - now_local_date).days
 
     if days_before not in (7, 3):
-        return
+        return 0, 0
 
-    active_ids = await _get_active_user_ids(session, now)
+    flow = await flow_repo.get_flow_by_id(session, flow_id)
+    active_ids = await _get_active_user_ids(session, now_utc)
     former_ids = await _get_former_user_ids(session)
 
     active_key = f"flow:{flow_id}:active:{days_before}"
@@ -133,19 +141,96 @@ async def send_flow_mailings(
     )
 
     # Критично: рассылки должны быть идемпотентными и с анти-спам ограничением.
-    await _send_bulk(session, bot, active_ids, active_text, active_key)
-    await _send_bulk(session, bot, former_ids, former_text, former_key)
+    sent_active = await _send_bulk(session, bot, active_ids, active_text, active_key)
+    sent_former = await _send_bulk(session, bot, former_ids, former_text, former_key)
+    logger.info(
+        "Flow start mailings sent",
+        extra={
+            "enabled": enabled,
+            "tz": settings.scheduler_timezone,
+            "now_local_date": str(now_local_date),
+            "flow_start_local_date": str(flow_start_local_date),
+            "flow_id": flow_id,
+            "days_before": days_before,
+            "flow_start_at": flow_start.isoformat(),
+            "flow_end_at": flow.end_at.isoformat() if flow else None,
+            "active_users_count": len(active_ids),
+            "former_users_count": len(former_ids),
+            "sent_active": sent_active,
+            "sent_former": sent_former,
+        },
+    )
+    return sent_active, sent_former
 
 
 async def send_manual_mailings(
     session: AsyncSession, bot: Bot, mode: str
 ) -> tuple[int, int]:
-    now = datetime.now(timezone.utc)
-    current_ids = await _get_active_user_ids(session, now)
+    tz = ZoneInfo(settings.scheduler_timezone)
+    now_utc = datetime.now(timezone.utc)
+    enabled = await get_mailings_enabled(session)
+    current_ids = await _get_active_user_ids(session, now_utc)
     former_ids = await _get_former_user_ids(session)
+    now_local_date = now_utc.astimezone(tz).date()
 
     sent_current = 0
     sent_former = 0
+    if mode in (
+        "free_start_minus_7",
+        "free_start_minus_3",
+        "paid_start_minus_7",
+        "paid_start_minus_3",
+    ):
+        delta_map = {
+            "free_start_minus_7": 7,
+            "free_start_minus_3": 3,
+            "paid_start_minus_7": 7,
+            "paid_start_minus_3": 3,
+        }
+        target_date = now_local_date + timedelta(days=delta_map[mode])
+        window_start = datetime.combine(target_date, time.min, tz)
+        window_end = datetime.combine(target_date, time.max, tz)
+        is_free = mode.startswith("free_start_")
+
+        result = await session.execute(
+            select(Flow).where(
+                Flow.is_free.is_(is_free),
+                Flow.start_at >= window_start,
+                Flow.start_at <= window_end,
+            )
+        )
+        flows = list(result.scalars().all())
+        flow_meta = [
+            {
+                "id": f.id,
+                "start_at": f.start_at.isoformat(),
+                "end_at": f.end_at.isoformat(),
+                "is_free": f.is_free,
+            }
+            for f in flows
+        ]
+
+        for flow in flows:
+            sent_active, sent_former_flow = await send_flow_mailings(
+                session, bot, flow.id, flow.start_at
+            )
+            sent_current += sent_active
+            sent_former += sent_former_flow
+
+        logger.info(
+            "Manual mailings (start-based) sent",
+            extra={
+                "enabled": enabled,
+                "tz": settings.scheduler_timezone,
+                "now_local_date": str(now_local_date),
+                "target_date_local": str(target_date),
+                "mode": mode,
+                "flows": flow_meta,
+                "sent_active": sent_current,
+                "sent_former": sent_former,
+            },
+        )
+        return sent_current, sent_former
     if mode in (
         "free_end_minus_7",
         "free_end_minus_3",
@@ -158,11 +243,12 @@ async def send_manual_mailings(
             "paid_end_minus_3": 3,
             "paid_end_minus_1": 1,
         }
-        target_date = (now.date() + timedelta(days=delta_map[mode]))
-        tz = now.tzinfo or timezone.utc
+        target_date = now_local_date + timedelta(days=delta_map[mode])
         window_start = datetime.combine(target_date, time.min, tz)
         window_end = datetime.combine(target_date, time.max, tz)
         is_free = mode.startswith("free_")
+        flow_meta: list[dict[str, str | int]] = []
+        attempted_current_recipients = 0
         result = await session.execute(
             select(Flow).where(
                 Flow.is_free.is_(is_free),
@@ -171,11 +257,21 @@ async def send_manual_mailings(
             )
         )
         flows = list(result.scalars().all())
+        flow_meta = [
+            {
+                "id": f.id,
+                "start_at": f.start_at.isoformat(),
+                "end_at": f.end_at.isoformat(),
+                "is_free": f.is_free,
+            }
+            for f in flows
+        ]
         text = await get_text(session, mode)
         for flow in flows:
-            user_ids = await _get_active_flow_user_ids(session, flow.id, now)
+            user_ids = await _get_active_flow_user_ids(session, flow.id, now_utc)
             if not user_ids:
                 continue
+            attempted_current_recipients += len(user_ids)
             sent_current += await _send_bulk(
                 session,
                 bot,
@@ -185,10 +281,25 @@ async def send_manual_mailings(
                 idempotent=False,
             )
         sent_former = 0
+        logger.info(
+            "Manual mailings (end-based) sent",
+            extra={
+                "enabled": enabled,
+                "tz": settings.scheduler_timezone,
+                "now_local_date": str(now_local_date),
+                "target_date_local": str(target_date),
+                "mode": mode,
+                "flows": flow_meta,
+                "attempted_current_recipients": attempted_current_recipients,
+                "sent_current": sent_current,
+            },
+        )
         return sent_current, sent_former
     if mode == "minus_7":
         current_text = await _get_template_text(session, "paid_transition_minus_7")
         former_text = await _get_template_text(session, "reminder_minus_7")
+        attempted_current_recipients = len(current_ids)
+        attempted_former_recipients = len(former_ids)
         sent_current = await _send_bulk(
             session,
             bot,
@@ -205,9 +316,23 @@ async def send_manual_mailings(
             mailing_key=None,
             idempotent=False,
         )
+        logger.info(
+            "Manual mailings (transition -7) sent",
+            extra={
+                "enabled": enabled,
+                "tz": settings.scheduler_timezone,
+                "now_local_date": str(now_utc.astimezone(tz).date()),
+                "mode": mode,
+                "attempted_current_recipients": attempted_current_recipients,
+                "attempted_former_recipients": attempted_former_recipients,
+                "sent_current": sent_current,
+                "sent_former": sent_former,
+            },
+        )
     elif mode == "minus_3":
         all_ids = list({*current_ids, *former_ids})
         text = await _get_template_text(session, "reminder_minus_3")
+        attempted_recipients = len(all_ids)
         sent_current = await _send_bulk(
             session,
             bot,
@@ -217,10 +342,24 @@ async def send_manual_mailings(
             idempotent=False,
         )
         sent_former = 0
+        logger.info(
+            "Manual mailings (transition -3) sent",
+            extra={
+                "enabled": enabled,
+                "tz": settings.scheduler_timezone,
+                "now_local_date": str(now_utc.astimezone(tz).date()),
+                "mode": mode,
+                "attempted_recipients": attempted_recipients,
+                "sent_current": sent_current,
+            },
+        )
 
     logger.info(
         "Manual mailings sent",
         extra={
+            "enabled": enabled,
+            "tz": settings.scheduler_timezone,
+            "now_local_date": str(now_utc.astimezone(tz).date()),
             "mode": mode,
             "sent_current": sent_current,
             "sent_former": sent_former,
@@ -251,37 +390,42 @@ async def send_custom_broadcast(
 async def send_auto_end_mailings(
     session: AsyncSession, bot: Bot, now: datetime
 ) -> int:
-    today = now.date()
-    tz = now.tzinfo or timezone.utc
-    window_start = datetime.combine(today - timedelta(days=7), time.min, tz)
-    window_end = datetime.combine(today + timedelta(days=1), time.max, tz)
+    tz = ZoneInfo(settings.scheduler_timezone)
+    now_utc = now.astimezone(timezone.utc)
+    enabled = await get_mailings_enabled(session)
+    today_local = now_utc.astimezone(tz).date()
+    window_start = datetime.combine(
+        today_local - timedelta(days=7), time.min, tz
+    )
+    window_end = datetime.combine(today_local + timedelta(days=1), time.max, tz)
     result = await session.execute(
         select(Flow).where(Flow.end_at >= window_start, Flow.end_at <= window_end)
     )
     flows = list(result.scalars().all())
     total_sent = 0
+    sent_flows = 0
     for flow in flows:
-        end_date = flow.end_at.date()
+        end_date_local = flow.end_at.astimezone(tz).date()
         template_key: str | None = None
         if flow.is_free:
-            if today == end_date - timedelta(days=7):
+            if today_local == end_date_local - timedelta(days=7):
                 template_key = "free_end_minus_7"
-            elif today == end_date - timedelta(days=3):
+            elif today_local == end_date_local - timedelta(days=3):
                 template_key = "free_end_minus_3"
         else:
-            if today == end_date - timedelta(days=3):
+            if today_local == end_date_local - timedelta(days=3):
                 template_key = "paid_end_minus_3"
-            elif today == end_date - timedelta(days=1):
+            elif today_local == end_date_local - timedelta(days=1):
                 template_key = "paid_end_minus_1"
 
         if not template_key:
             continue
 
-        key = f"auto:{template_key}:{flow.id}:{today}"
+        key = f"auto:{template_key}:{flow.id}:{today_local}"
         if await has_action_with_key(session, "mailing_sent", key):
             continue
 
-        user_ids = await _get_active_flow_user_ids(session, flow.id, now)
+        user_ids = await _get_active_flow_user_ids(session, flow.id, now_utc)
         if not user_ids:
             await add_audit_log(
                 session, action="mailing_sent", payload={"key": key, "count": 0}
@@ -298,4 +442,33 @@ async def send_auto_end_mailings(
             idempotent=True,
         )
         total_sent += sent
+        sent_flows += 1
+        logger.info(
+            "Auto end mailing sent",
+            extra={
+                "enabled": enabled,
+                "tz": settings.scheduler_timezone,
+                "today_local": str(today_local),
+                "template_key": template_key,
+                "flow_id": flow.id,
+                "flow_start_at": flow.start_at.isoformat(),
+                "flow_end_at": flow.end_at.isoformat(),
+                "end_date_local": str(end_date_local),
+                "recipients_count": len(user_ids),
+                "sent": sent,
+            },
+        )
+    logger.info(
+        "Auto end mailings run",
+        extra={
+            "enabled": enabled,
+            "tz": settings.scheduler_timezone,
+            "today_local": str(today_local),
+            "window_start_local": str(window_start),
+            "window_end_local": str(window_end),
+            "flows_considered": len(flows),
+            "sent_flows": sent_flows,
+            "total_sent": total_sent,
+        },
+    )
     return total_sent
