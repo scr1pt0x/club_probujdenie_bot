@@ -34,6 +34,37 @@ class PromoCodeState(StatesGroup):
     waiting_code = State()
 
 
+async def _resolve_free_access_flow(
+    session: AsyncSession, user_id: int, now: datetime
+) -> int | None:
+    active_membership = await membership_repo.get_active_membership(session, user_id)
+
+    # Продлевающие: приоритет на следующий платный, затем текущий платный.
+    if active_membership is not None:
+        next_paid = await flow_repo.get_next_paid_flow(session, now)
+        if next_paid:
+            return next_paid.id
+        active_paid = await flow_repo.get_active_paid_flow(session, now)
+        if active_paid:
+            return active_paid.id
+        return active_membership.flow_id
+
+    # Новые участницы: сначала платный поток, если его нет — бесплатный.
+    next_paid = await flow_repo.get_next_paid_flow(session, now)
+    if next_paid:
+        return next_paid.id
+    active_paid = await flow_repo.get_active_paid_flow(session, now)
+    if active_paid:
+        return active_paid.id
+    next_free = await flow_repo.get_next_free_flow(session, now)
+    if next_free:
+        return next_free.id
+    active_free = await flow_repo.get_active_free_flow(session, now)
+    if active_free:
+        return active_free.id
+    return None
+
+
 async def _send_personal_payment_link(
     session: AsyncSession, tg_user: types.User, responder: types.Message
 ) -> None:
@@ -50,12 +81,14 @@ async def _send_personal_payment_link(
 
     price = await calculate_price_rub(session, user_id=user.id, paid_at=now)
     if price <= 0:
+        flow_id = await _resolve_free_access_flow(session, user.id, now)
         payment = Payment(
             user_id=user.id,
             provider="promo",
             status=PaymentStatus.PENDING,
             amount_rub=0,
             currency="RUB",
+            flow_id=flow_id,
         )
         session.add(payment)
         await session.flush()
