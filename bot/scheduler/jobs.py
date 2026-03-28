@@ -13,7 +13,7 @@ from bot.repositories import memberships as membership_repo
 from bot.repositories import payments as payment_repo
 from bot.repositories import users as user_repo
 from bot.services.mailings import send_auto_end_mailings, send_flow_mailings
-from bot.services.payments import confirm_payment
+from bot.services.payments import confirm_payment, notify_payment_status
 from bot.services.settings import get_mailings_enabled
 from bot.payments.adapter import PaymentAdapter
 from config import settings
@@ -92,8 +92,14 @@ async def check_pending_payments(
             await confirm_payment(session, bot, payment, paid_at=now)
         elif status == PaymentStatus.FAILED:
             payment.status = PaymentStatus.FAILED
+            await notify_payment_status(
+                session, bot, payment.user_id, "payment_failed"
+            )
         elif status == PaymentStatus.EXPIRED:
             payment.status = PaymentStatus.EXPIRED
+            await notify_payment_status(
+                session, bot, payment.user_id, "payment_expired"
+            )
     await session.commit()
 
 

@@ -8,7 +8,7 @@ from bot.db.session import AsyncSessionLocal
 from bot.db.models import PaymentStatus
 from bot.payments.yookassa_adapter import YooKassaAdapter
 from bot.repositories.payments import get_payment_by_external_id
-from bot.services.payments import confirm_payment
+from bot.services.payments import confirm_payment, notify_payment_status
 from config import settings
 
 
@@ -70,6 +70,9 @@ def create_app(bot) -> FastAPI:
 
             if event == "payment.canceled":
                 payment.status = PaymentStatus.FAILED
+                await notify_payment_status(
+                    session, bot, payment.user_id, "payment_failed"
+                )
                 await session.commit()
                 return Response(status_code=200)
 

@@ -12,7 +12,7 @@ from bot.repositories.users import get_or_create_user
 from bot.services.flows import get_next_paid_flow
 from bot.services.memberships import compute_grace_end
 from bot.services.memberships import apply_pay_later
-from bot.services.payments import calculate_price_rub
+from bot.services.payments import calculate_price_rub, confirm_payment
 from bot.payments.yookassa_adapter import YooKassaAdapter
 from bot.services.promos import is_promo_valid
 from bot.services.settings import (
@@ -50,10 +50,17 @@ async def _send_personal_payment_link(
 
     price = await calculate_price_rub(session, user_id=user.id, paid_at=now)
     if price <= 0:
-        base_text = await get_text(session, "pay_unavailable")
-        await responder.answer(
-            f"Ваша персональная стоимость участия:\n{base_text}\nВаша цена сейчас: {price} ₽"
+        payment = Payment(
+            user_id=user.id,
+            provider="promo",
+            status=PaymentStatus.PENDING,
+            amount_rub=0,
+            currency="RUB",
         )
+        session.add(payment)
+        await session.flush()
+        await confirm_payment(session, responder.bot, payment, paid_at=now)
+        await session.commit()
         return
 
     payment = Payment(
@@ -80,7 +87,7 @@ async def _send_personal_payment_link(
     except Exception:
         payment.status = PaymentStatus.FAILED
         await session.commit()
-        await responder.answer("Ошибка создания платежа. Попробуйте позже.")
+        await responder.answer(await get_text(session, "payment_failed"))
         return
 
     keyboard = types.InlineKeyboardMarkup(
@@ -475,4 +482,5 @@ async def promo_code_apply_handler(
     await promo_repo.add_user_promo(session, user_id, code)
     await session.commit()
     await state.clear()
-    await message.answer("✅ Промокод применен")
+    await message.answer("✅ Промокод применен. Проверяю персональную стоимость...")
+    await _send_personal_payment_link(session, message.from_user, message)

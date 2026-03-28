@@ -10,6 +10,7 @@ from bot.repositories import memberships as membership_repo
 from bot.services import memberships as membership_service
 from bot.services.promos import apply_promo_to_price
 from bot.services.settings import get_effective_settings
+from bot.services.texts import get_text
 from config import settings
 from bot.access_control.service import grant_access
 from bot.repositories import users as user_repo
@@ -47,6 +48,26 @@ async def calculate_price_rub(
     else:
         base_price = effective.intro_price_rub
     return await apply_promo_to_price(session, user_id, base_price)
+
+
+async def notify_payment_status(
+    session: AsyncSession,
+    bot: Bot,
+    user_id: int,
+    template_key: str,
+    reply_markup: types.InlineKeyboardMarkup | None = None,
+) -> None:
+    user = await user_repo.get_user_by_id(session, user_id)
+    if not user:
+        return
+    text = await get_text(session, template_key)
+    try:
+        await bot.send_message(user.tg_id, text, reply_markup=reply_markup)
+    except Exception:
+        logger.exception(
+            "Failed to send payment status message",
+            extra={"user_id": user_id, "template_key": template_key},
+        )
 
 
 async def resolve_flow_for_payment(
@@ -94,6 +115,9 @@ async def confirm_payment(
             "Payment needs review: no flow matched",
             extra={"payment_id": payment.id, "external_id": payment.external_id},
         )
+        await notify_payment_status(
+            session, bot, payment.user_id, "payment_needs_review"
+        )
         return
 
     payment.status = PaymentStatus.PAID
@@ -106,6 +130,9 @@ async def confirm_payment(
         logger.error(
             "Payment needs review: flow not found",
             extra={"payment_id": payment.id, "flow_id": flow_id},
+        )
+        await notify_payment_status(
+            session, bot, payment.user_id, "payment_needs_review"
         )
         return
     access_start_at = paid_at if early_flow_id else flow.start_at
@@ -122,18 +149,7 @@ async def confirm_payment(
     if user:
         links = await grant_access(bot, user.tg_id)
         kb = _access_links_kb(links.get("channel_link"), links.get("group_link"))
-        if kb is not None:
-            try:
-                await bot.send_message(
-                    user.tg_id,
-                    "Оплата подтверждена. Нажмите кнопки и отправьте заявку на вступление.",
-                    reply_markup=kb,
-                )
-            except Exception:
-                logger.exception(
-                    "Failed to send access links after payment",
-                    extra={"user_id": payment.user_id, "payment_id": payment.id},
-                )
+        await notify_payment_status(session, bot, payment.user_id, "payment_success", kb)
     if membership.pay_later_deadline_at:
         membership.pay_later_deadline_at = None
         membership.pay_later_used_at = None
@@ -154,6 +170,9 @@ async def manual_confirm_payment(
             "Manual confirm failed: flow not found",
             extra={"payment_id": payment.id, "flow_id": flow_id},
         )
+        await notify_payment_status(
+            session, bot, payment.user_id, "payment_needs_review"
+        )
         return
 
     payment.status = PaymentStatus.PAID
@@ -173,18 +192,7 @@ async def manual_confirm_payment(
     if user:
         links = await grant_access(bot, user.tg_id)
         kb = _access_links_kb(links.get("channel_link"), links.get("group_link"))
-        if kb is not None:
-            try:
-                await bot.send_message(
-                    user.tg_id,
-                    "Оплата подтверждена. Нажмите кнопки и отправьте заявку на вступление.",
-                    reply_markup=kb,
-                )
-            except Exception:
-                logger.exception(
-                    "Failed to send access links after manual payment",
-                    extra={"user_id": payment.user_id, "payment_id": payment.id},
-                )
+        await notify_payment_status(session, bot, payment.user_id, "payment_success", kb)
     if membership.pay_later_deadline_at:
         membership.pay_later_deadline_at = None
         membership.pay_later_used_at = None
