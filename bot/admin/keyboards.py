@@ -111,6 +111,11 @@ def mailings_menu_kb(enabled: bool) -> InlineKeyboardMarkup:
                 callback_data="admin:mailings:custom:current_unpaid",
             )
         ],
+        [
+            InlineKeyboardButton(
+                text="✉️ Свободная рассылка", callback_data="admin:mailings:custom"
+            )
+        ],
     ]
     rows.extend(back_menu_kb("admin:menu").inline_keyboard)
     return InlineKeyboardMarkup(inline_keyboard=rows)
