@@ -26,20 +26,42 @@ from config import settings
 logger = logging.getLogger(__name__)
 
 
+async def _has_other_active_membership(
+    session: AsyncSession, user_id: int, exclude_membership_id: int
+) -> bool:
+    result = await session.execute(
+        select(Membership.id)
+        .where(Membership.user_id == user_id)
+        .where(Membership.status == MembershipStatus.ACTIVE)
+        .where(Membership.id != exclude_membership_id)
+        .limit(1)
+    )
+    return result.scalar_one_or_none() is not None
+
+
 async def expire_memberships(session: AsyncSession, bot: Bot) -> None:
     now = datetime.now(timezone.utc)
     memberships = await membership_repo.list_memberships_to_expire(session, now)
+    revoked_user_ids: set[int] = set()
     for membership in memberships:
         membership.status = MembershipStatus.EXPIRED
         user = await user_repo.get_user_by_id(session, membership.user_id)
-        if user:
+        if (
+            user
+            and user.id not in revoked_user_ids
+            and not await _has_other_active_membership(
+                session, membership.user_id, membership.id
+            )
+        ):
             await revoke_access(bot, user.tg_id)
+            revoked_user_ids.add(user.id)
     await session.commit()
 
 
 async def enforce_pay_later_deadlines(session: AsyncSession, bot: Bot) -> None:
     now = datetime.now(timezone.utc)
     revoke_text = await get_text(session, "pay_later_access_revoked")
+    revoked_user_ids: set[int] = set()
     result = await session.execute(
         select(Membership)
         .where(Membership.status == MembershipStatus.ACTIVE)
@@ -49,7 +71,13 @@ async def enforce_pay_later_deadlines(session: AsyncSession, bot: Bot) -> None:
     for membership in result.scalars().all():
         membership.status = MembershipStatus.EXPIRED
         user = await user_repo.get_user_by_id(session, membership.user_id)
-        if user:
+        if (
+            user
+            and user.id not in revoked_user_ids
+            and not await _has_other_active_membership(
+                session, membership.user_id, membership.id
+            )
+        ):
             try:
                 await bot.send_message(user.tg_id, revoke_text)
             except Exception:
@@ -58,6 +86,7 @@ async def enforce_pay_later_deadlines(session: AsyncSession, bot: Bot) -> None:
                     extra={"user_id": membership.user_id, "membership_id": membership.id},
                 )
             await revoke_access(bot, user.tg_id)
+            revoked_user_ids.add(user.id)
     await session.commit()
 
 
@@ -69,6 +98,7 @@ async def remove_non_renewed_on_flow_start(
     if flow is None or flow.start_at.date() != now:
         return
 
+    revoked_user_ids: set[int] = set()
     result = await session.execute(
         select(Membership)
         .where(Membership.status == MembershipStatus.ACTIVE)
@@ -76,11 +106,27 @@ async def remove_non_renewed_on_flow_start(
         .where(Membership.pay_later_used_at.is_(None))
     )
     for membership in result.scalars().all():
+        target_membership = await membership_repo.get_membership_by_flow(
+            session, user_id=membership.user_id, flow_id=flow.id
+        )
+        if (
+            target_membership is not None
+            and target_membership.status == MembershipStatus.ACTIVE
+        ):
+            continue
+
         # Критично: если не было "оплатить позже" и оплаты, удаляем в первый день потока.
         membership.status = MembershipStatus.EXPIRED
         user = await user_repo.get_user_by_id(session, membership.user_id)
-        if user:
+        if (
+            user
+            and user.id not in revoked_user_ids
+            and not await _has_other_active_membership(
+                session, membership.user_id, membership.id
+            )
+        ):
             await revoke_access(bot, user.tg_id)
+            revoked_user_ids.add(user.id)
     await session.commit()
 
 
