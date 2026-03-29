@@ -107,12 +107,20 @@ async def check_pending_payments(
             elif status == PaymentStatus.FAILED:
                 payment.status = PaymentStatus.FAILED
                 await notify_payment_status(
-                    session, bot, payment.user_id, "payment_failed"
+                    session,
+                    bot,
+                    payment.user_id,
+                    "payment_failed",
+                    dedupe_key=f"payment:{payment.id}:payment_failed",
                 )
             elif status == PaymentStatus.EXPIRED:
                 payment.status = PaymentStatus.EXPIRED
                 await notify_payment_status(
-                    session, bot, payment.user_id, "payment_expired"
+                    session,
+                    bot,
+                    payment.user_id,
+                    "payment_expired",
+                    dedupe_key=f"payment:{payment.id}:payment_expired",
                 )
             else:
                 continue

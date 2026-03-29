@@ -14,6 +14,7 @@ from bot.services.texts import get_text
 from config import settings
 from bot.access_control.service import grant_access
 from bot.repositories import users as user_repo
+from bot.repositories.audit_log import add_audit_log, has_action_with_key
 
 
 logger = logging.getLogger(__name__)
@@ -56,13 +57,26 @@ async def notify_payment_status(
     user_id: int,
     template_key: str,
     reply_markup: types.InlineKeyboardMarkup | None = None,
+    dedupe_key: str | None = None,
 ) -> None:
+    if dedupe_key and await has_action_with_key(session, "payment_notice_sent", dedupe_key):
+        return
     user = await user_repo.get_user_by_id(session, user_id)
     if not user:
         return
     text = await get_text(session, template_key)
     try:
         await bot.send_message(user.tg_id, text, reply_markup=reply_markup)
+        if dedupe_key:
+            await add_audit_log(
+                session,
+                action="payment_notice_sent",
+                payload={
+                    "key": dedupe_key,
+                    "user_id": user_id,
+                    "template_key": template_key,
+                },
+            )
     except Exception:
         logger.exception(
             "Failed to send payment status message",
@@ -116,7 +130,11 @@ async def confirm_payment(
             extra={"payment_id": payment.id, "external_id": payment.external_id},
         )
         await notify_payment_status(
-            session, bot, payment.user_id, "payment_needs_review"
+            session,
+            bot,
+            payment.user_id,
+            "payment_needs_review",
+            dedupe_key=f"payment:{payment.id}:payment_needs_review",
         )
         return
 
@@ -132,7 +150,11 @@ async def confirm_payment(
             extra={"payment_id": payment.id, "flow_id": flow_id},
         )
         await notify_payment_status(
-            session, bot, payment.user_id, "payment_needs_review"
+            session,
+            bot,
+            payment.user_id,
+            "payment_needs_review",
+            dedupe_key=f"payment:{payment.id}:payment_needs_review",
         )
         return
     access_start_at = paid_at if early_flow_id else flow.start_at
@@ -149,7 +171,14 @@ async def confirm_payment(
     if user:
         links = await grant_access(bot, user.tg_id)
         kb = _access_links_kb(links.get("channel_link"), links.get("group_link"))
-        await notify_payment_status(session, bot, payment.user_id, "payment_success", kb)
+        await notify_payment_status(
+            session,
+            bot,
+            payment.user_id,
+            "payment_success",
+            kb,
+            dedupe_key=f"payment:{payment.id}:payment_success",
+        )
     if membership.pay_later_deadline_at:
         membership.pay_later_deadline_at = None
         membership.pay_later_used_at = None
@@ -171,7 +200,11 @@ async def manual_confirm_payment(
             extra={"payment_id": payment.id, "flow_id": flow_id},
         )
         await notify_payment_status(
-            session, bot, payment.user_id, "payment_needs_review"
+            session,
+            bot,
+            payment.user_id,
+            "payment_needs_review",
+            dedupe_key=f"payment:{payment.id}:payment_needs_review",
         )
         return
 
@@ -192,7 +225,14 @@ async def manual_confirm_payment(
     if user:
         links = await grant_access(bot, user.tg_id)
         kb = _access_links_kb(links.get("channel_link"), links.get("group_link"))
-        await notify_payment_status(session, bot, payment.user_id, "payment_success", kb)
+        await notify_payment_status(
+            session,
+            bot,
+            payment.user_id,
+            "payment_success",
+            kb,
+            dedupe_key=f"payment:{payment.id}:payment_success",
+        )
     if membership.pay_later_deadline_at:
         membership.pay_later_deadline_at = None
         membership.pay_later_used_at = None

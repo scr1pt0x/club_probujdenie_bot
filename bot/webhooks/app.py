@@ -71,7 +71,11 @@ def create_app(bot) -> FastAPI:
             if event == "payment.canceled":
                 payment.status = PaymentStatus.FAILED
                 await notify_payment_status(
-                    session, bot, payment.user_id, "payment_failed"
+                    session,
+                    bot,
+                    payment.user_id,
+                    "payment_failed",
+                    dedupe_key=f"payment:{payment.id}:payment_failed",
                 )
                 await session.commit()
                 return Response(status_code=200)
