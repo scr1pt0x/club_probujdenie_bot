@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.access_control.service import revoke_access
-from bot.db.models import Membership, MembershipStatus, PaymentStatus
+from bot.db.models import Membership, MembershipStatus, Payment, PaymentStatus
 from bot.repositories import flows as flow_repo
 from bot.repositories import memberships as membership_repo
 from bot.repositories import payments as payment_repo
@@ -26,6 +26,24 @@ from config import settings
 logger = logging.getLogger(__name__)
 
 
+def _is_revoke_jobs_enabled() -> bool:
+    return settings.revoke_jobs_enabled
+
+
+def _is_mass_revoke_blocked(job_name: str, candidates_count: int) -> bool:
+    if candidates_count <= settings.max_revoke_per_run:
+        return False
+    logger.error(
+        "Mass revoke blocked by safety limit",
+        extra={
+            "job": job_name,
+            "candidates_count": candidates_count,
+            "max_revoke_per_run": settings.max_revoke_per_run,
+        },
+    )
+    return True
+
+
 async def _has_other_active_membership(
     session: AsyncSession, user_id: int, exclude_membership_id: int
 ) -> bool:
@@ -39,9 +57,27 @@ async def _has_other_active_membership(
     return result.scalar_one_or_none() is not None
 
 
+async def _has_paid_payment_for_flow(
+    session: AsyncSession, user_id: int, flow_id: int
+) -> bool:
+    result = await session.execute(
+        select(Payment.id)
+        .where(Payment.user_id == user_id)
+        .where(Payment.flow_id == flow_id)
+        .where(Payment.status == PaymentStatus.PAID)
+        .limit(1)
+    )
+    return result.scalar_one_or_none() is not None
+
+
 async def expire_memberships(session: AsyncSession, bot: Bot) -> None:
+    if not _is_revoke_jobs_enabled():
+        logger.warning("Revoke jobs disabled: expire_memberships skipped")
+        return
     now = datetime.now(timezone.utc)
     memberships = await membership_repo.list_memberships_to_expire(session, now)
+    if _is_mass_revoke_blocked("expire_memberships", len(memberships)):
+        return
     revoked_user_ids: set[int] = set()
     for membership in memberships:
         membership.status = MembershipStatus.EXPIRED
@@ -59,6 +95,9 @@ async def expire_memberships(session: AsyncSession, bot: Bot) -> None:
 
 
 async def enforce_pay_later_deadlines(session: AsyncSession, bot: Bot) -> None:
+    if not _is_revoke_jobs_enabled():
+        logger.warning("Revoke jobs disabled: enforce_pay_later_deadlines skipped")
+        return
     now = datetime.now(timezone.utc)
     revoke_text = await get_text(session, "pay_later_access_revoked")
     revoked_user_ids: set[int] = set()
@@ -68,7 +107,10 @@ async def enforce_pay_later_deadlines(session: AsyncSession, bot: Bot) -> None:
         .where(Membership.pay_later_deadline_at.is_not(None))
         .where(Membership.pay_later_deadline_at <= now)
     )
-    for membership in result.scalars().all():
+    memberships = list(result.scalars().all())
+    if _is_mass_revoke_blocked("enforce_pay_later_deadlines", len(memberships)):
+        return
+    for membership in memberships:
         membership.status = MembershipStatus.EXPIRED
         user = await user_repo.get_user_by_id(session, membership.user_id)
         if (
@@ -93,9 +135,14 @@ async def enforce_pay_later_deadlines(session: AsyncSession, bot: Bot) -> None:
 async def remove_non_renewed_on_flow_start(
     session: AsyncSession, bot: Bot, flow_id: int
 ) -> None:
-    now = datetime.now(timezone.utc).date()
+    if not _is_revoke_jobs_enabled():
+        logger.warning("Revoke jobs disabled: remove_non_renewed_on_flow_start skipped")
+        return
+    now_utc = datetime.now(timezone.utc)
+    tz = ZoneInfo(settings.scheduler_timezone)
+    now = now_utc.astimezone(tz).date()
     flow = await flow_repo.get_flow_by_id(session, flow_id)
-    if flow is None or flow.start_at.date() != now:
+    if flow is None or flow.start_at.astimezone(tz).date() != now:
         return
 
     revoked_user_ids: set[int] = set()
@@ -105,7 +152,10 @@ async def remove_non_renewed_on_flow_start(
         .where(Membership.access_end_at < flow.start_at)
         .where(Membership.pay_later_used_at.is_(None))
     )
-    for membership in result.scalars().all():
+    memberships = list(result.scalars().all())
+    if _is_mass_revoke_blocked("remove_non_renewed_on_flow_start", len(memberships)):
+        return
+    for membership in memberships:
         target_membership = await membership_repo.get_membership_by_flow(
             session, user_id=membership.user_id, flow_id=flow.id
         )
@@ -113,6 +163,10 @@ async def remove_non_renewed_on_flow_start(
             target_membership is not None
             and target_membership.status == MembershipStatus.ACTIVE
         ):
+            continue
+        if await _has_paid_payment_for_flow(session, membership.user_id, flow.id):
+            # Safety net: paid users must never be removed even if membership row
+            # for target flow has not been created yet.
             continue
 
         # Критично: если не было "оплатить позже" и оплаты, удаляем в первый день потока.

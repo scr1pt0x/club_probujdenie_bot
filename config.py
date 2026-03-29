@@ -38,6 +38,10 @@ class Settings:
 
     # Scheduler
     scheduler_timezone: str = _get_env("SCHEDULER_TZ", "UTC")
+    revoke_jobs_enabled: bool = (
+        _get_env("REVOKE_JOBS_ENABLED", "false").lower() == "true"
+    )
+    max_revoke_per_run: int = int(_get_env("MAX_REVOKE_PER_RUN", "30"))
 
     # YooKassa
     yookassa_shop_id: str = _get_env("YOO_KASSA_SHOP_ID")

@@ -1,8 +1,13 @@
+import logging
+
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from bot.db.session import AsyncSessionLocal
 from bot.scheduler import jobs
 from config import settings
+
+
+logger = logging.getLogger(__name__)
 
 
 def setup_scheduler(bot, payment_adapter=None) -> AsyncIOScheduler:
@@ -32,20 +37,23 @@ def setup_scheduler(bot, payment_adapter=None) -> AsyncIOScheduler:
             lambda s: jobs.check_pending_payments(s, bot, payment_adapter)
         )
 
-    scheduler.add_job(
-        _expire_memberships_job,
-        "interval",
-        minutes=30,
-        id="expire_memberships",
-        replace_existing=True,
-    )
-    scheduler.add_job(
-        _enforce_pay_later_deadlines_job,
-        "interval",
-        minutes=30,
-        id="enforce_pay_later_deadlines",
-        replace_existing=True,
-    )
+    if settings.revoke_jobs_enabled:
+        scheduler.add_job(
+            _expire_memberships_job,
+            "interval",
+            minutes=30,
+            id="expire_memberships",
+            replace_existing=True,
+        )
+        scheduler.add_job(
+            _enforce_pay_later_deadlines_job,
+            "interval",
+            minutes=30,
+            id="enforce_pay_later_deadlines",
+            replace_existing=True,
+        )
+    else:
+        logger.warning("Revoke jobs are disabled via REVOKE_JOBS_ENABLED=false")
     scheduler.add_job(
         _send_scheduled_mailings_job,
         "interval",
@@ -61,13 +69,14 @@ def setup_scheduler(bot, payment_adapter=None) -> AsyncIOScheduler:
         id="auto_mailings",
         replace_existing=True,
     )
-    scheduler.add_job(
-        _remove_non_renewed_job,
-        "interval",
-        hours=12,
-        id="remove_non_renewed",
-        replace_existing=True,
-    )
+    if settings.revoke_jobs_enabled:
+        scheduler.add_job(
+            _remove_non_renewed_job,
+            "interval",
+            hours=12,
+            id="remove_non_renewed",
+            replace_existing=True,
+        )
 
     if payment_adapter is not None:
         scheduler.add_job(
