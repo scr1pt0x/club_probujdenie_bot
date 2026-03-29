@@ -8,7 +8,7 @@ from sqlalchemy import distinct, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.admin.templates import DEFAULT_TEMPLATES
-from bot.db.models import Flow, Membership, MembershipStatus, User
+from bot.db.models import Flow, Membership, MembershipStatus, Payment, PaymentStatus, User
 from bot.repositories import flows as flow_repo
 from bot.repositories.audit_log import add_audit_log, has_action_with_key
 from bot.repositories.message_templates import get_template_by_key
@@ -391,6 +391,8 @@ async def send_custom_broadcast(
         user_ids = await _get_active_user_ids(session, now)
     elif audience == "former":
         user_ids = await _get_former_user_ids(session)
+    elif audience == "current_unpaid":
+        user_ids = await _get_current_unpaid_transition_user_ids(session, now)
     elif audience == "all":
         active_ids = await _get_active_user_ids(session, now)
         former_ids = await _get_former_user_ids(session)
@@ -400,6 +402,45 @@ async def send_custom_broadcast(
     return await _send_bulk(
         session, bot, user_ids, text, mailing_key=None, idempotent=False
     )
+
+
+async def _get_current_unpaid_transition_user_ids(
+    session: AsyncSession, now: datetime
+) -> list[int]:
+    current_flow = await flow_repo.get_active_free_flow(session, now)
+    if current_flow is None:
+        current_flow = await flow_repo.get_active_paid_flow(session, now)
+    if current_flow is None:
+        return []
+
+    next_paid_flow = await flow_repo.get_next_paid_flow(session, now)
+    if next_paid_flow is None:
+        return []
+
+    current_user_ids = await _get_active_flow_user_ids(session, current_flow.id, now)
+    if not current_user_ids:
+        return []
+
+    paid_result = await session.execute(
+        select(distinct(Payment.user_id))
+        .where(Payment.flow_id == next_paid_flow.id)
+        .where(Payment.status == PaymentStatus.PAID)
+        .where(Payment.user_id.in_(current_user_ids))
+    )
+    paid_user_ids = {row[0] for row in paid_result.all()}
+
+    result = [uid for uid in current_user_ids if uid not in paid_user_ids]
+    logger.info(
+        "Current unpaid transition audience selected",
+        extra={
+            "current_flow_id": current_flow.id,
+            "next_paid_flow_id": next_paid_flow.id,
+            "current_participants_count": len(current_user_ids),
+            "already_paid_count": len(paid_user_ids),
+            "unpaid_count": len(result),
+        },
+    )
+    return result
 
 
 async def send_auto_end_mailings(

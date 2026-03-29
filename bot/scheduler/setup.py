@@ -12,29 +12,49 @@ def setup_scheduler(bot, payment_adapter=None) -> AsyncIOScheduler:
         async with AsyncSessionLocal() as session:
             await coro(session)
 
+    async def _expire_memberships_job():
+        await _with_session(lambda s: jobs.expire_memberships(s, bot))
+
+    async def _enforce_pay_later_deadlines_job():
+        await _with_session(lambda s: jobs.enforce_pay_later_deadlines(s, bot))
+
+    async def _send_scheduled_mailings_job():
+        await _with_session(lambda s: jobs.send_scheduled_mailings(s, bot))
+
+    async def _auto_mailings_job():
+        await jobs.auto_mailings(bot, AsyncSessionLocal)
+
+    async def _remove_non_renewed_job():
+        await _with_session(lambda s: jobs.remove_non_renewed_on_paid_flows(s, bot))
+
+    async def _check_payments_job():
+        await _with_session(
+            lambda s: jobs.check_pending_payments(s, bot, payment_adapter)
+        )
+
     scheduler.add_job(
-        lambda: _with_session(lambda s: jobs.expire_memberships(s, bot)),
+        _expire_memberships_job,
         "interval",
         minutes=30,
         id="expire_memberships",
         replace_existing=True,
     )
     scheduler.add_job(
-        lambda: _with_session(lambda s: jobs.enforce_pay_later_deadlines(s, bot)),
+        _enforce_pay_later_deadlines_job,
         "interval",
         minutes=30,
         id="enforce_pay_later_deadlines",
         replace_existing=True,
     )
     scheduler.add_job(
-        lambda: _with_session(lambda s: jobs.send_scheduled_mailings(s, bot)),
+        _send_scheduled_mailings_job,
         "interval",
         hours=12,
         id="send_mailings",
         replace_existing=True,
     )
     scheduler.add_job(
-        lambda: jobs.auto_mailings(bot, AsyncSessionLocal),
+        _auto_mailings_job,
         "cron",
         hour=10,
         minute=0,
@@ -42,7 +62,7 @@ def setup_scheduler(bot, payment_adapter=None) -> AsyncIOScheduler:
         replace_existing=True,
     )
     scheduler.add_job(
-        lambda: _with_session(lambda s: jobs.remove_non_renewed_on_paid_flows(s, bot)),
+        _remove_non_renewed_job,
         "interval",
         hours=12,
         id="remove_non_renewed",
@@ -51,9 +71,7 @@ def setup_scheduler(bot, payment_adapter=None) -> AsyncIOScheduler:
 
     if payment_adapter is not None:
         scheduler.add_job(
-            lambda: _with_session(
-                lambda s: jobs.check_pending_payments(s, bot, payment_adapter)
-            ),
+            _check_payments_job,
             "interval",
             minutes=10,
             id="check_payments",

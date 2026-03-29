@@ -248,6 +248,12 @@ def _mailings_custom_audience_kb() -> InlineKeyboardMarkup:
                 text="🕓 Бывшим", callback_data="admin:mailings:custom:former"
             ),
         ],
+        [
+            InlineKeyboardButton(
+                text="💳 Не оплатившим",
+                callback_data="admin:mailings:custom:current_unpaid",
+            )
+        ],
     ]
     rows.extend(back_menu_kb("admin:mailings").inline_keyboard)
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -455,7 +461,7 @@ async def admin_section(
             return
         if len(parts) == 3 and parts[1] == "custom":
             audience = parts[2]
-            if audience not in ("all", "active", "former"):
+            if audience not in ("all", "active", "former", "current_unpaid"):
                 await callback.answer("Неизвестная аудитория", show_alert=True)
                 return
             await state.set_state(CustomMailingState.waiting_text)
@@ -1169,7 +1175,7 @@ async def custom_mailing_text_handler(
         return
     data = await state.get_data()
     audience = data.get("audience")
-    if audience not in ("all", "active", "former"):
+    if audience not in ("all", "active", "former", "current_unpaid"):
         await state.clear()
         await message.answer("Аудитория не найдена.")
         return

@@ -93,47 +93,22 @@ def mailings_menu_kb(enabled: bool) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text=toggle_text, callback_data="admin:mailings:toggle")],
         [
             InlineKeyboardButton(
-                text="Бесплатный −7",
-                callback_data="admin:mailings:run:free_end_minus_7",
+                text="👥 Всем",
+                callback_data="admin:mailings:custom:all",
             ),
             InlineKeyboardButton(
-                text="Бесплатный −3",
-                callback_data="admin:mailings:run:free_end_minus_3",
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                text="Платный −3",
-                callback_data="admin:mailings:run:paid_end_minus_3",
-            ),
-            InlineKeyboardButton(
-                text="Платный −1",
-                callback_data="admin:mailings:run:paid_end_minus_1",
+                text="✅ Текущим",
+                callback_data="admin:mailings:custom:active",
             ),
         ],
         [
             InlineKeyboardButton(
-                text="Платный старт −7",
-                callback_data="admin:mailings:run:paid_start_minus_7",
+                text="🕓 Бывшим",
+                callback_data="admin:mailings:custom:former",
             ),
             InlineKeyboardButton(
-                text="Платный старт −3",
-                callback_data="admin:mailings:run:paid_start_minus_3",
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                text="Бесплатный старт −7",
-                callback_data="admin:mailings:run:free_start_minus_7",
-            ),
-            InlineKeyboardButton(
-                text="Бесплатный старт −3",
-                callback_data="admin:mailings:run:free_start_minus_3",
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                text="✉️ Свободная рассылка", callback_data="admin:mailings:custom"
+                text="💳 Не оплатившим",
+                callback_data="admin:mailings:custom:current_unpaid",
             )
         ],
     ]
