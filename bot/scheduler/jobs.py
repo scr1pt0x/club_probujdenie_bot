@@ -100,20 +100,32 @@ async def check_pending_payments(
     now = datetime.now(timezone.utc)
     pending = await payment_repo.list_pending_payments(session, now)
     for payment in pending:
-        status = await adapter.get_payment_status(payment.external_id)
-        if status == PaymentStatus.PAID:
-            await confirm_payment(session, bot, payment, paid_at=now)
-        elif status == PaymentStatus.FAILED:
-            payment.status = PaymentStatus.FAILED
-            await notify_payment_status(
-                session, bot, payment.user_id, "payment_failed"
+        try:
+            status = await adapter.get_payment_status(payment.external_id)
+            if status == PaymentStatus.PAID:
+                await confirm_payment(session, bot, payment, paid_at=now)
+            elif status == PaymentStatus.FAILED:
+                payment.status = PaymentStatus.FAILED
+                await notify_payment_status(
+                    session, bot, payment.user_id, "payment_failed"
+                )
+            elif status == PaymentStatus.EXPIRED:
+                payment.status = PaymentStatus.EXPIRED
+                await notify_payment_status(
+                    session, bot, payment.user_id, "payment_expired"
+                )
+            else:
+                continue
+
+            # Commit each processed payment independently so one failure
+            # does not keep previously handled payments in PENDING state.
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            logger.exception(
+                "Failed to process pending payment",
+                extra={"payment_id": payment.id, "external_id": payment.external_id},
             )
-        elif status == PaymentStatus.EXPIRED:
-            payment.status = PaymentStatus.EXPIRED
-            await notify_payment_status(
-                session, bot, payment.user_id, "payment_expired"
-            )
-    await session.commit()
 
 
 async def send_scheduled_mailings(session: AsyncSession, bot: Bot) -> None:

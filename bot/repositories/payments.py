@@ -21,6 +21,8 @@ async def list_pending_payments(
     result = await session.execute(
         select(Payment)
         .where(Payment.status == PaymentStatus.PENDING)
+        .where(Payment.external_id.is_not(None))
+        .where(Payment.external_id != "")
         .where((Payment.expires_at.is_(None)) | (Payment.expires_at >= now))
     )
     return list(result.scalars().all())
