@@ -136,23 +136,8 @@ async def send_flow_mailings(
     active_key = f"flow:{flow_id}:active:{days_before}"
     former_key = f"flow:{flow_id}:former:{days_before}"
 
-    active_template = await get_template_by_key(
-        session, f"mailing_active_{days_before}"
-    )
-    former_template = await get_template_by_key(
-        session, f"mailing_former_{days_before}"
-    )
-
-    active_text = (
-        active_template.text
-        if active_template
-        else "Скоро новый поток. Продлите участие."
-    )
-    former_text = (
-        former_template.text
-        if former_template
-        else "Стартует новый поток. Приглашаем присоединиться."
-    )
+    active_text = await _get_template_text(session, f"mailing_active_{days_before}")
+    former_text = await _get_template_text(session, f"mailing_former_{days_before}")
 
     # Критично: рассылки должны быть идемпотентными и с анти-спам ограничением.
     sent_active = await _send_bulk(session, bot, active_ids, active_text, active_key)
