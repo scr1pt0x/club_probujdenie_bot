@@ -63,5 +63,6 @@ async def get_next_paid_flow(session: AsyncSession, now: datetime) -> Flow | Non
         .where(Flow.is_free.is_(False))
         .where(Flow.start_at >= now)
         .order_by(Flow.start_at.asc())
+        .limit(1)
     )
-    return result.scalar_one_or_none()
+    return result.scalars().first()

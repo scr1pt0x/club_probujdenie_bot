@@ -19,9 +19,10 @@ async def has_action_with_key(
     session: AsyncSession, action: str, key: str
 ) -> bool:
     result = await session.execute(
-        select(AuditLog)
+        select(AuditLog.id)
         .where(AuditLog.action == action)
         .where(AuditLog.payload["key"].astext == key)
+        .limit(1)
     )
     return result.scalar_one_or_none() is not None
 

@@ -22,8 +22,9 @@ async def get_active_paid_flow(session: AsyncSession, now: datetime) -> Flow | N
         .where(Flow.is_free.is_(False))
         .where(Flow.start_at <= now, Flow.end_at >= now)
         .order_by(Flow.start_at.desc())
+        .limit(1)
     )
-    return result.scalar_one_or_none()
+    return result.scalars().first()
 
 
 async def get_active_free_flow(session: AsyncSession, now: datetime) -> Flow | None:
@@ -32,8 +33,9 @@ async def get_active_free_flow(session: AsyncSession, now: datetime) -> Flow | N
         .where(Flow.is_free.is_(True))
         .where(Flow.start_at <= now, Flow.end_at >= now)
         .order_by(Flow.start_at.desc())
+        .limit(1)
     )
-    return result.scalar_one_or_none()
+    return result.scalars().first()
 
 
 async def get_next_free_flow(session: AsyncSession, now: datetime) -> Flow | None:
@@ -42,8 +44,9 @@ async def get_next_free_flow(session: AsyncSession, now: datetime) -> Flow | Non
         .where(Flow.is_free.is_(True))
         .where(Flow.start_at >= now)
         .order_by(Flow.start_at.asc())
+        .limit(1)
     )
-    return result.scalar_one_or_none()
+    return result.scalars().first()
 
 
 async def get_next_paid_flow(session: AsyncSession, now: datetime) -> Flow | None:
@@ -52,8 +55,9 @@ async def get_next_paid_flow(session: AsyncSession, now: datetime) -> Flow | Non
         .where(Flow.is_free.is_(False))
         .where(Flow.start_at >= now)
         .order_by(Flow.start_at.asc())
+        .limit(1)
     )
-    return result.scalar_one_or_none()
+    return result.scalars().first()
 
 
 async def get_flow_in_sales_window(session: AsyncSession, now: datetime) -> Flow | None:
@@ -61,8 +65,9 @@ async def get_flow_in_sales_window(session: AsyncSession, now: datetime) -> Flow
         select(Flow)
         .where(Flow.sales_open_at <= now, Flow.sales_close_at >= now)
         .order_by(Flow.start_at.asc())
+        .limit(1)
     )
-    return result.scalar_one_or_none()
+    return result.scalars().first()
 
 
 async def get_flow_by_start(

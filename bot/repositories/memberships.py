@@ -14,8 +14,9 @@ async def get_active_membership(
         .where(Membership.user_id == user_id)
         .where(Membership.status == MembershipStatus.ACTIVE)
         .order_by(Membership.access_end_at.desc())
+        .limit(1)
     )
-    return result.scalar_one_or_none()
+    return result.scalars().first()
 
 
 async def get_membership_by_flow(
@@ -46,8 +47,9 @@ async def get_latest_membership(
         select(Membership)
         .where(Membership.user_id == user_id)
         .order_by(Membership.created_at.desc(), Membership.id.desc())
+        .limit(1)
     )
-    return result.scalar_one_or_none()
+    return result.scalars().first()
 
 
 async def count_pay_later_used(session: AsyncSession) -> int:

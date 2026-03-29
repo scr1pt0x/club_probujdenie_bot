@@ -33,7 +33,7 @@ from bot.repositories.message_templates import get_template_by_key, upsert_templ
 from bot.repositories.promos import delete_user_promos
 from bot.repositories import promos as promo_repo
 from bot.repositories.users import get_or_create_user, get_user_by_id, get_user_by_tg_id, get_user_by_username
-from bot.services.mailings import send_custom_broadcast, send_manual_mailings
+from bot.services.mailings import send_custom_broadcast
 from bot.services.memberships import compute_grace_end
 from bot.services.settings import (
     get_effective_settings,
@@ -384,6 +384,7 @@ async def admin_section(
         return
 
     section = callback.data.split(":", 1)[1]
+    text: str | None = None
     if section == "flows":
         await _show_flows_screen(callback, session)
         return
@@ -469,36 +470,6 @@ async def admin_section(
             await callback.message.answer(
                 "Введите текст рассылки одним сообщением.",
                 reply_markup=back_menu_kb("admin:mailings"),
-            )
-            await callback.answer()
-            return
-        if len(parts) == 3 and parts[1] == "run":
-            mode = parts[2]
-            if mode not in (
-                "free_end_minus_7",
-                "free_end_minus_3",
-                "paid_end_minus_3",
-                "paid_end_minus_1",
-                    "free_start_minus_7",
-                    "free_start_minus_3",
-                    "paid_start_minus_7",
-                    "paid_start_minus_3",
-            ):
-                await callback.answer("Неизвестный режим", show_alert=True)
-                return
-            enabled = await get_mailings_enabled(session)
-            if not enabled:
-                await callback.message.answer(
-                    "⛔ Рассылки выключены. Включите в админке."
-                )
-                await callback.answer()
-                return
-            sent_current, sent_former = await send_manual_mailings(
-                session, callback.message.bot, mode
-            )
-            await session.commit()
-            await callback.message.answer(
-                f"Готово. Отправлено: текущие {sent_current}, бывшие {sent_former}."
             )
             await callback.answer()
             return
@@ -838,6 +809,8 @@ async def admin_section(
     )
     await session.commit()
 
+    if text is None:
+        text = "Неизвестный раздел."
     await callback.message.answer(text)
     await callback.answer()
 
@@ -1039,6 +1012,18 @@ async def promo_create_code_handler(
     await message.answer("Выберите тип промокода:", reply_markup=promo_kind_kb())
 
 
+@router.message(PromoCreateState.waiting_kind)
+async def promo_create_kind_text_handler(
+    message: types.Message, session: AsyncSession, state: FSMContext
+) -> None:
+    if message.from_user.id not in settings.admin_tg_ids:
+        await state.clear()
+        return
+    await message.answer(
+        "Нажмите одну из кнопок выше для выбора типа.", reply_markup=promo_kind_kb()
+    )
+
+
 @router.message(PromoCreateState.waiting_value)
 async def promo_create_value_handler(
     message: types.Message, session: AsyncSession, state: FSMContext
@@ -1238,6 +1223,9 @@ async def shop_price_edit_handler(
 async def template_text_handler(
     message: types.Message, session: AsyncSession, state: FSMContext
 ) -> None:
+    if message.from_user.id not in settings.admin_tg_ids:
+        await state.clear()
+        return
     data = await state.get_data()
     key = data.get("template_key")
     if not key or key not in DEFAULT_TEMPLATES:

@@ -262,6 +262,9 @@ async def send_scheduled_mailings(session: AsyncSession, bot: Bot) -> None:
     }
 
     enabled = await get_mailings_enabled(session)
+    if not enabled:
+        logger.info("Scheduled mailings disabled, skipping")
+        return
     flows = await flow_repo.list_flows(session)
     matched_flows = []
     for flow in flows:

@@ -57,6 +57,9 @@ async def add_user_promo(
     if existing:
         existing.applied_at = datetime.now(timezone.utc)
         return
+    promo = await get_promo_by_code(session, code)
+    if promo is not None:
+        promo.used_count = (promo.used_count or 0) + 1
     session.add(UserPromo(user_id=user_id, code=code.upper()))
 
 
