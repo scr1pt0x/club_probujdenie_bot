@@ -123,6 +123,16 @@ def mailings_menu_kb(enabled: bool) -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton(
+                text="Бесплатный старт −7",
+                callback_data="admin:mailings:run:free_start_minus_7",
+            ),
+            InlineKeyboardButton(
+                text="Бесплатный старт −3",
+                callback_data="admin:mailings:run:free_start_minus_3",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
                 text="✉️ Свободная рассылка", callback_data="admin:mailings:custom"
             )
         ],

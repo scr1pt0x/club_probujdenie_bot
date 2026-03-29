@@ -12,9 +12,14 @@ from bot.repositories import flows as flow_repo
 from bot.repositories import memberships as membership_repo
 from bot.repositories import payments as payment_repo
 from bot.repositories import users as user_repo
-from bot.services.mailings import send_auto_end_mailings, send_flow_mailings
+from bot.services.mailings import (
+    send_auto_end_mailings,
+    send_flow_mailings,
+    send_pay_later_deadline_reminders,
+)
 from bot.services.payments import confirm_payment, notify_payment_status
 from bot.services.settings import get_mailings_enabled
+from bot.services.texts import get_text
 from bot.payments.adapter import PaymentAdapter
 from config import settings
 
@@ -34,6 +39,7 @@ async def expire_memberships(session: AsyncSession, bot: Bot) -> None:
 
 async def enforce_pay_later_deadlines(session: AsyncSession, bot: Bot) -> None:
     now = datetime.now(timezone.utc)
+    revoke_text = await get_text(session, "pay_later_access_revoked")
     result = await session.execute(
         select(Membership)
         .where(Membership.status == MembershipStatus.ACTIVE)
@@ -44,6 +50,13 @@ async def enforce_pay_later_deadlines(session: AsyncSession, bot: Bot) -> None:
         membership.status = MembershipStatus.EXPIRED
         user = await user_repo.get_user_by_id(session, membership.user_id)
         if user:
+            try:
+                await bot.send_message(user.tg_id, revoke_text)
+            except Exception:
+                logger.exception(
+                    "Failed to notify user on pay-later expiry",
+                    extra={"user_id": membership.user_id, "membership_id": membership.id},
+                )
             await revoke_access(bot, user.tg_id)
     await session.commit()
 
@@ -165,4 +178,5 @@ async def auto_mailings(bot: Bot, sessionmaker) -> None:
             },
         )
         await send_auto_end_mailings(session, bot, now)
+        await send_pay_later_deadline_reminders(session, bot, now)
         await session.commit()

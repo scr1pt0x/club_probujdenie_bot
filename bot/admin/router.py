@@ -218,9 +218,19 @@ async def _show_mailings_screen(
 ) -> None:
     enabled = await get_mailings_enabled(session)
     override = await get_setting(session, "mailings_enabled_override")
+    now = datetime.now(timezone.utc)
+    pay_later_total = await membership_repo.count_pay_later_used(session)
+    pay_later_active = await membership_repo.count_pay_later_active(session, now)
+    pay_later_overdue = await membership_repo.count_pay_later_overdue(session, now)
     status = "включено" if enabled else "выключено"
     source = "override" if override is not None else "env"
-    text = f"Рассылки: {status} ({source})"
+    text = (
+        f"Рассылки: {status} ({source})\n\n"
+        "Оплачу позже:\n"
+        f"- Использовали: {pay_later_total}\n"
+        f"- Активная отсрочка: {pay_later_active}\n"
+        f"- Просрочено (до отключения): {pay_later_overdue}"
+    )
     await callback.message.answer(text, reply_markup=mailings_menu_kb(enabled))
     await callback.answer()
 

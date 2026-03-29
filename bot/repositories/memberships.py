@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.db.models import Membership, MembershipStatus
@@ -48,3 +48,34 @@ async def get_latest_membership(
         .order_by(Membership.created_at.desc(), Membership.id.desc())
     )
     return result.scalar_one_or_none()
+
+
+async def count_pay_later_used(session: AsyncSession) -> int:
+    result = await session.execute(
+        select(func.count())
+        .select_from(Membership)
+        .where(Membership.pay_later_used_at.is_not(None))
+    )
+    return int(result.scalar_one() or 0)
+
+
+async def count_pay_later_active(session: AsyncSession, now: datetime) -> int:
+    result = await session.execute(
+        select(func.count())
+        .select_from(Membership)
+        .where(Membership.status == MembershipStatus.ACTIVE)
+        .where(Membership.pay_later_deadline_at.is_not(None))
+        .where(Membership.pay_later_deadline_at > now)
+    )
+    return int(result.scalar_one() or 0)
+
+
+async def count_pay_later_overdue(session: AsyncSession, now: datetime) -> int:
+    result = await session.execute(
+        select(func.count())
+        .select_from(Membership)
+        .where(Membership.status == MembershipStatus.ACTIVE)
+        .where(Membership.pay_later_deadline_at.is_not(None))
+        .where(Membership.pay_later_deadline_at <= now)
+    )
+    return int(result.scalar_one() or 0)

@@ -62,6 +62,17 @@ async def _get_former_user_ids(session: AsyncSession) -> list[int]:
     return [row[0] for row in result.all()]
 
 
+async def _get_flow_participant_user_ids(
+    session: AsyncSession, flow_id: int
+) -> set[int]:
+    result = await session.execute(
+        select(distinct(Membership.user_id))
+        .where(Membership.flow_id == flow_id)
+        .where(Membership.status == MembershipStatus.ACTIVE)
+    )
+    return {row[0] for row in result.all()}
+
+
 async def _send_bulk(
     session: AsyncSession,
     bot: Bot,
@@ -116,8 +127,11 @@ async def send_flow_mailings(
         return 0, 0
 
     flow = await flow_repo.get_flow_by_id(session, flow_id)
+    already_in_target_flow = await _get_flow_participant_user_ids(session, flow_id)
     active_ids = await _get_active_user_ids(session, now_utc)
     former_ids = await _get_former_user_ids(session)
+    active_ids = [uid for uid in active_ids if uid not in already_in_target_flow]
+    former_ids = [uid for uid in former_ids if uid not in already_in_target_flow]
 
     active_key = f"flow:{flow_id}:active:{days_before}"
     former_key = f"flow:{flow_id}:former:{days_before}"
@@ -156,6 +170,7 @@ async def send_flow_mailings(
             "flow_end_at": flow.end_at.isoformat() if flow else None,
             "active_users_count": len(active_ids),
             "former_users_count": len(former_ids),
+            "excluded_already_in_target_flow": len(already_in_target_flow),
             "sent_active": sent_active,
             "sent_former": sent_former,
         },
@@ -426,6 +441,15 @@ async def send_auto_end_mailings(
             continue
 
         user_ids = await _get_active_flow_user_ids(session, flow.id, now_utc)
+        next_paid_flow = await flow_repo.get_next_paid_flow(session, flow.end_at)
+        already_in_next_paid_flow: set[int] = set()
+        if next_paid_flow is not None:
+            already_in_next_paid_flow = await _get_flow_participant_user_ids(
+                session, next_paid_flow.id
+            )
+            user_ids = [
+                uid for uid in user_ids if uid not in already_in_next_paid_flow
+            ]
         if not user_ids:
             await add_audit_log(
                 session, action="mailing_sent", payload={"key": key, "count": 0}
@@ -454,6 +478,8 @@ async def send_auto_end_mailings(
                 "flow_start_at": flow.start_at.isoformat(),
                 "flow_end_at": flow.end_at.isoformat(),
                 "end_date_local": str(end_date_local),
+                "next_paid_flow_id": next_paid_flow.id if next_paid_flow else None,
+                "excluded_already_in_next_paid": len(already_in_next_paid_flow),
                 "recipients_count": len(user_ids),
                 "sent": sent,
             },
@@ -472,3 +498,61 @@ async def send_auto_end_mailings(
         },
     )
     return total_sent
+
+
+async def send_pay_later_deadline_reminders(
+    session: AsyncSession, bot: Bot, now: datetime
+) -> int:
+    tz = ZoneInfo(settings.scheduler_timezone)
+    now_utc = now.astimezone(timezone.utc)
+    today_local = now_utc.astimezone(tz).date()
+
+    result = await session.execute(
+        select(Membership)
+        .where(Membership.status == MembershipStatus.ACTIVE)
+        .where(Membership.pay_later_deadline_at.is_not(None))
+    )
+    memberships = list(result.scalars().all())
+
+    sent = 0
+    for membership in memberships:
+        deadline = membership.pay_later_deadline_at
+        if deadline is None:
+            continue
+        deadline_local = deadline.astimezone(tz).date()
+        template_key: str | None = None
+        if today_local == deadline_local - timedelta(days=1):
+            template_key = "pay_later_deadline_minus_1"
+        elif today_local == deadline_local:
+            template_key = "pay_later_deadline_today"
+
+        if template_key is None:
+            continue
+
+        key = f"auto:{template_key}:membership:{membership.id}:{today_local}"
+        if await has_action_with_key(session, "mailing_sent", key):
+            continue
+
+        user = await session.get(User, membership.user_id)
+        if user is None:
+            await add_audit_log(session, "mailing_sent", {"key": key, "count": 0})
+            continue
+
+        text = await _get_template_text(session, template_key)
+        try:
+            await bot.send_message(user.tg_id, text)
+            sent += 1
+            await add_audit_log(session, "mailing_sent", {"key": key, "count": 1})
+        except Exception:
+            await add_audit_log(session, "mailing_sent", {"key": key, "count": 0})
+
+    logger.info(
+        "Pay-later reminders run",
+        extra={
+            "tz": settings.scheduler_timezone,
+            "today_local": str(today_local),
+            "memberships_checked": len(memberships),
+            "sent": sent,
+        },
+    )
+    return sent

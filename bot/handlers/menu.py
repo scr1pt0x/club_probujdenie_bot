@@ -82,6 +82,9 @@ async def _send_personal_payment_link(
     price = await calculate_price_rub(session, user_id=user.id, paid_at=now)
     if price <= 0:
         flow_id = await _resolve_free_access_flow(session, user.id, now)
+        if flow_id is None:
+            await responder.answer(await get_text(session, "payment_needs_review"))
+            return
         payment = Payment(
             user_id=user.id,
             provider="promo",
@@ -285,8 +288,9 @@ async def shop_free_detail(callback: types.CallbackQuery, session: AsyncSession)
 @router.callback_query(lambda c: c.data == "shop:checkout:intro")
 async def shop_checkout_intro(callback: types.CallbackQuery, session: AsyncSession) -> None:
     prices = await get_shop_prices(session)
+    order_text = await get_text(session, "shop_order_text")
     await callback.message.answer(
-        f"К оплате: {_format_price(prices['intro'])} ₽",
+        f"{order_text}\nК оплате: {_format_price(prices['intro'])} ₽",
         reply_markup=_shop_order_kb("intro"),
     )
     await callback.answer()
@@ -295,8 +299,9 @@ async def shop_checkout_intro(callback: types.CallbackQuery, session: AsyncSessi
 @router.callback_query(lambda c: c.data == "shop:checkout:renewal")
 async def shop_checkout_renewal(callback: types.CallbackQuery, session: AsyncSession) -> None:
     prices = await get_shop_prices(session)
+    order_text = await get_text(session, "shop_order_text")
     await callback.message.answer(
-        f"К оплате: {_format_price(prices['renewal'])} ₽",
+        f"{order_text}\nК оплате: {_format_price(prices['renewal'])} ₽",
         reply_markup=_shop_order_kb("renewal"),
     )
     await callback.answer()
