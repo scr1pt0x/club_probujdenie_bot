@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.access_control.service import revoke_access
-from bot.db.models import Membership, MembershipStatus, Payment, PaymentStatus
+from bot.db.models import Flow, Membership, MembershipStatus, Payment, PaymentStatus
 from bot.repositories import flows as flow_repo
 from bot.repositories import memberships as membership_repo
 from bot.repositories import payments as payment_repo
@@ -70,6 +70,20 @@ async def _has_paid_payment_for_flow(
     return result.scalar_one_or_none() is not None
 
 
+async def _has_any_future_paid_payment(
+    session: AsyncSession, user_id: int, now: datetime
+) -> bool:
+    result = await session.execute(
+        select(Payment.id)
+        .join(Flow, Payment.flow_id == Flow.id)
+        .where(Payment.user_id == user_id)
+        .where(Payment.status == PaymentStatus.PAID)
+        .where(Flow.end_at > now)
+        .limit(1)
+    )
+    return result.scalar_one_or_none() is not None
+
+
 async def expire_memberships(session: AsyncSession, bot: Bot) -> None:
     if not _is_revoke_jobs_enabled():
         logger.warning("Revoke jobs disabled: expire_memberships skipped")
@@ -80,6 +94,8 @@ async def expire_memberships(session: AsyncSession, bot: Bot) -> None:
         return
     revoked_user_ids: set[int] = set()
     for membership in memberships:
+        if await _has_any_future_paid_payment(session, membership.user_id, now):
+            continue
         membership.status = MembershipStatus.EXPIRED
         user = await user_repo.get_user_by_id(session, membership.user_id)
         if (

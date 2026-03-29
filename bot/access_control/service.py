@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 async def _safe_ban(bot: Bot, chat_id: int, tg_id: int) -> None:
     try:
-        await bot.ban_chat_member(chat_id=chat_id, user_id=tg_id, revoke_messages=True)
+        await bot.ban_chat_member(chat_id=chat_id, user_id=tg_id, revoke_messages=False)
     except TelegramAPIError:
         logger.exception(
             "Failed to ban member from chat",

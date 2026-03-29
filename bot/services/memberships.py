@@ -57,9 +57,9 @@ def mark_membership_expired(membership: Membership) -> None:
 async def apply_pay_later(
     session: AsyncSession, user_id: int, now: datetime
 ) -> tuple[bool, str]:
-    membership = await membership_repo.get_latest_membership(session, user_id=user_id)
+    membership = await membership_repo.get_active_membership(session, user_id=user_id)
     if not membership:
-        return False, "Опция недоступна: нет участия."
+        return False, "Опция недоступна: нет активного участия."
 
     next_flow = await get_next_paid_flow(session, now)
     if not next_flow:

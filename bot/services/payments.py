@@ -113,8 +113,15 @@ async def resolve_early_full_payment_flow(
 async def confirm_payment(
     session: AsyncSession, bot: Bot, payment: Payment, paid_at: datetime | None = None
 ) -> None:
-    # Важно: commit выполняется вызывающим кодом.
     if payment.status == PaymentStatus.PAID:
+        user = await user_repo.get_user_by_id(session, payment.user_id)
+        if user:
+            links = await grant_access(bot, user.tg_id)
+            kb = _access_links_kb(links.get("channel_link"), links.get("group_link"))
+            await notify_payment_status(
+                session, bot, payment.user_id, "payment_success", kb,
+                dedupe_key=f"payment:{payment.id}:payment_success",
+            )
         return
 
     paid_at = paid_at or datetime.now(timezone.utc)

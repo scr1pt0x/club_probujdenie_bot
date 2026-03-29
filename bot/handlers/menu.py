@@ -1,9 +1,11 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from aiogram import Router, types
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from sqlalchemy import select
 
 from bot.repositories import flows as flow_repo
 from bot.repositories import memberships as membership_repo
@@ -99,12 +101,29 @@ async def _send_personal_payment_link(
         await session.commit()
         return
 
+    existing_pending = (
+        await session.execute(
+            select(Payment)
+            .where(Payment.user_id == user.id)
+            .where(Payment.status == PaymentStatus.PENDING)
+            .where(Payment.external_id.is_not(None))
+            .where(Payment.amount_rub == price)
+            .order_by(Payment.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if existing_pending is not None:
+        await confirm_payment(session, responder.bot, existing_pending, paid_at=now)
+        await session.commit()
+        return
+
     payment = Payment(
         user_id=user.id,
         provider="yookassa",
         status=PaymentStatus.PENDING,
         amount_rub=price,
         currency="RUB",
+        expires_at=now + timedelta(hours=1),
     )
     session.add(payment)
     await session.flush()

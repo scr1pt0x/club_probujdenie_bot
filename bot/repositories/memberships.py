@@ -34,7 +34,7 @@ async def list_memberships_to_expire(
     result = await session.execute(
         select(Membership)
         .where(Membership.status == MembershipStatus.ACTIVE)
-        .where(Membership.access_end_at < now)
+        .where(Membership.grace_end_at < now)
     )
     return list(result.scalars().all())
 

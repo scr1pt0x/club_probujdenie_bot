@@ -37,6 +37,7 @@ def create_app(bot) -> FastAPI:
                 PaymentStatus.PAID,
                 PaymentStatus.FAILED,
                 PaymentStatus.EXPIRED,
+                PaymentStatus.NEEDS_REVIEW,
             }:
                 return Response(status_code=200)
 
