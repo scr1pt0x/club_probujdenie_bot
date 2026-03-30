@@ -124,7 +124,6 @@ async def confirm_payment(
             kb = _access_links_kb(links.get("channel_link"), links.get("group_link"))
             await notify_payment_status(
                 session, bot, payment.user_id, "payment_success", kb,
-                dedupe_key=f"payment:{payment.id}:payment_success",
             )
         return
 
