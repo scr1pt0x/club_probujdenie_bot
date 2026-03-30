@@ -87,9 +87,13 @@ async def notify_payment_status(
 async def resolve_flow_for_payment(
     session: AsyncSession, paid_at: datetime
 ) -> int | None:
+    next_paid = await flow_repo.get_next_paid_flow(session, paid_at)
+    if next_paid is not None:
+        return next_paid.id
     flow = await flow_repo.get_flow_in_sales_window(session, paid_at)
-    if flow is None:
-        flow = await flow_repo.get_active_paid_flow(session, paid_at)
+    if flow is not None:
+        return flow.id
+    flow = await flow_repo.get_active_paid_flow(session, paid_at)
     return flow.id if flow else None
 
 

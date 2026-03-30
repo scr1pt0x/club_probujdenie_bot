@@ -117,25 +117,30 @@ async def _send_personal_payment_link(
         adapter = YooKassaAdapter()
         try:
             remote = await adapter.get_payment(existing_pending.external_id)
-            if remote.get("status") == "succeeded":
+            remote_status = remote.get("status")
+            if remote_status == "succeeded":
                 await confirm_payment(
                     session, responder.bot, existing_pending, paid_at=now
                 )
                 await session.commit()
                 return
-            conf = remote.get("confirmation", {})
-            url = conf.get("confirmation_url")
-            if url and remote.get("status") == "pending":
-                keyboard = types.InlineKeyboardMarkup(
-                    inline_keyboard=[
-                        [types.InlineKeyboardButton(text="🔗 Оплатить", url=url)]
-                    ]
-                )
-                await responder.answer(
-                    f"У вас уже есть активный счёт на {price} ₽",
-                    reply_markup=keyboard,
-                )
-                return
+            if remote_status in ("canceled", "expired"):
+                existing_pending.status = PaymentStatus.FAILED
+                await session.commit()
+            elif remote_status == "pending":
+                conf = remote.get("confirmation", {})
+                url = conf.get("confirmation_url")
+                if url:
+                    keyboard = types.InlineKeyboardMarkup(
+                        inline_keyboard=[
+                            [types.InlineKeyboardButton(text="🔗 Оплатить", url=url)]
+                        ]
+                    )
+                    await responder.answer(
+                        f"У вас уже есть активный счёт на {price} ₽",
+                        reply_markup=keyboard,
+                    )
+                    return
         except Exception:
             pass
 
