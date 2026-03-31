@@ -217,7 +217,13 @@ async def _send_personal_payment_link(
 
     keyboard = types.InlineKeyboardMarkup(
         inline_keyboard=[
-            [types.InlineKeyboardButton(text="🔗 Оплатить", url=confirmation_url)]
+            [types.InlineKeyboardButton(text="🔗 Оплатить", url=confirmation_url)],
+            [
+                types.InlineKeyboardButton(
+                    text="✅ Я уже оплатила, проверить",
+                    callback_data="payment:refresh",
+                )
+            ],
         ]
     )
     await responder.answer(
