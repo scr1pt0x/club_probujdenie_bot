@@ -37,6 +37,26 @@ def _access_links_kb(
     return types.InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+async def _notify_success_with_links_fallback(
+    session: AsyncSession,
+    bot: Bot,
+    user_id: int,
+    channel_link: str | None,
+    group_link: str | None,
+    dedupe_key: str | None = None,
+) -> None:
+    kb = _access_links_kb(channel_link, group_link)
+    template_key = "payment_success" if kb is not None else "payment_success_no_links"
+    await notify_payment_status(
+        session,
+        bot,
+        user_id,
+        template_key,
+        kb,
+        dedupe_key=dedupe_key,
+    )
+
+
 async def calculate_price_rub(
     session: AsyncSession, user_id: int, paid_at: datetime
 ) -> int:
@@ -121,9 +141,12 @@ async def confirm_payment(
         user = await user_repo.get_user_by_id(session, payment.user_id)
         if user:
             links = await grant_access(bot, user.tg_id)
-            kb = _access_links_kb(links.get("channel_link"), links.get("group_link"))
-            await notify_payment_status(
-                session, bot, payment.user_id, "payment_success", kb,
+            await _notify_success_with_links_fallback(
+                session,
+                bot,
+                payment.user_id,
+                links.get("channel_link"),
+                links.get("group_link"),
             )
         return
 
@@ -180,13 +203,12 @@ async def confirm_payment(
     user = await user_repo.get_user_by_id(session, payment.user_id)
     if user:
         links = await grant_access(bot, user.tg_id)
-        kb = _access_links_kb(links.get("channel_link"), links.get("group_link"))
-        await notify_payment_status(
+        await _notify_success_with_links_fallback(
             session,
             bot,
             payment.user_id,
-            "payment_success",
-            kb,
+            links.get("channel_link"),
+            links.get("group_link"),
             dedupe_key=f"payment:{payment.id}:payment_success",
         )
     if membership.pay_later_deadline_at:
@@ -234,13 +256,12 @@ async def manual_confirm_payment(
     user = await user_repo.get_user_by_id(session, payment.user_id)
     if user:
         links = await grant_access(bot, user.tg_id)
-        kb = _access_links_kb(links.get("channel_link"), links.get("group_link"))
-        await notify_payment_status(
+        await _notify_success_with_links_fallback(
             session,
             bot,
             payment.user_id,
-            "payment_success",
-            kb,
+            links.get("channel_link"),
+            links.get("group_link"),
             dedupe_key=f"payment:{payment.id}:payment_success",
         )
     if membership.pay_later_deadline_at:

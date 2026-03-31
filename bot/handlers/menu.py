@@ -24,7 +24,7 @@ from bot.services.settings import (
 )
 from bot.services.texts import get_text
 from bot.access_control.service import grant_access
-from bot.db.models import Membership, MembershipStatus, Payment, PaymentStatus
+from bot.db.models import Flow, Membership, MembershipStatus, Payment, PaymentStatus
 from config import settings
 
 
@@ -48,6 +48,53 @@ def _metadata_matches_payment(remote: dict, payment: Payment, user_id: int) -> b
     except (TypeError, ValueError):
         return False
     return True
+
+
+async def _find_paid_payment_with_active_flow(
+    session: AsyncSession, user_id: int, now: datetime
+) -> Payment | None:
+    result = await session.execute(
+        select(Payment)
+        .join(Flow, Payment.flow_id == Flow.id)
+        .where(Payment.user_id == user_id)
+        .where(Payment.status == PaymentStatus.PAID)
+        .where(Flow.is_free.is_(False))
+        .where(Flow.end_at >= now)
+        .order_by(Payment.paid_at.desc(), Payment.id.desc())
+        .limit(1)
+    )
+    return result.scalars().first()
+
+
+async def _close_duplicate_pending_payments(
+    session: AsyncSession, user_id: int, now: datetime
+) -> None:
+    result = await session.execute(
+        select(Payment)
+        .where(Payment.user_id == user_id)
+        .where(Payment.status == PaymentStatus.PENDING)
+        .where(Payment.external_id.is_not(None))
+    )
+    for pending in result.scalars().all():
+        if pending.expires_at and pending.expires_at < now:
+            pending.status = PaymentStatus.EXPIRED
+        else:
+            pending.status = PaymentStatus.FAILED
+
+
+async def _send_paid_access_links(
+    session: AsyncSession, responder: types.Message, tg_id: int
+) -> None:
+    links = await grant_access(responder.bot, tg_id)
+    kb = _access_links_kb(links.get("channel_link"), links.get("group_link"))
+    if kb is None:
+        await responder.answer("Оплата уже подтверждена. Доступ активирован.")
+        return
+    await responder.answer(
+        "Оплата уже подтверждена. Доступ активирован.\n"
+        "Нажмите кнопки ниже и отправьте заявку на вступление.",
+        reply_markup=kb,
+    )
 
 
 async def _resolve_free_access_flow(
@@ -94,6 +141,15 @@ async def _send_personal_payment_link(
         is_admin=tg_user.id in settings.admin_tg_ids,
     )
     await session.commit()
+
+    # If payment was already completed for current/future paid flow,
+    # resend links immediately and do not create a new invoice.
+    already_paid = await _find_paid_payment_with_active_flow(session, user.id, now)
+    if already_paid is not None:
+        await _close_duplicate_pending_payments(session, user.id, now)
+        await session.commit()
+        await _send_paid_access_links(session, responder, tg_user.id)
+        return
 
     latest_membership = await membership_repo.get_latest_membership(session, user.id)
     if (
@@ -441,6 +497,13 @@ async def payment_refresh_handler(
         )
     ).scalar_one_or_none()
     if pending_payment is None:
+        already_paid = await _find_paid_payment_with_active_flow(session, user.id, now)
+        if already_paid is not None:
+            await _close_duplicate_pending_payments(session, user.id, now)
+            await session.commit()
+            await _send_paid_access_links(session, callback.message, callback.from_user.id)
+            await callback.answer("Оплата уже подтверждена")
+            return
         await callback.message.answer(
             "Активных счетов не найдено. Нажмите «💳 Моя оплата», чтобы создать новый."
         )
