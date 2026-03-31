@@ -15,6 +15,20 @@ from config import settings
 logger = logging.getLogger(__name__)
 
 
+def _metadata_matches_payment(remote: dict, payment_user_id: int, payment_id: int) -> bool:
+    metadata = remote.get("metadata") or {}
+    remote_internal_id = metadata.get("internal_payment_id")
+    remote_user_id = metadata.get("user_id")
+    try:
+        if remote_internal_id is not None and int(remote_internal_id) != payment_id:
+            return False
+        if remote_user_id is not None and int(remote_user_id) != payment_user_id:
+            return False
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
 def create_app(bot) -> FastAPI:
     app = FastAPI()
     adapter = YooKassaAdapter()
@@ -48,6 +62,16 @@ def create_app(bot) -> FastAPI:
                     logger.exception("Failed to verify payment", exc_info=exc)
                     return Response(status_code=200)
                 if remote.get("status") != "succeeded":
+                    return Response(status_code=200)
+                if not _metadata_matches_payment(remote, payment.user_id, payment.id):
+                    logger.warning(
+                        "Payment metadata mismatch",
+                        extra={
+                            "payment_id": payment_id,
+                            "local_payment_id": payment.id,
+                            "local_user_id": payment.user_id,
+                        },
+                    )
                     return Response(status_code=200)
                 try:
                     remote_amount = Decimal(remote["amount"]["value"])

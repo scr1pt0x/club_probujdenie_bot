@@ -36,6 +36,20 @@ class PromoCodeState(StatesGroup):
     waiting_code = State()
 
 
+def _metadata_matches_payment(remote: dict, payment: Payment, user_id: int) -> bool:
+    metadata = remote.get("metadata") or {}
+    remote_internal_id = metadata.get("internal_payment_id")
+    remote_user_id = metadata.get("user_id")
+    try:
+        if remote_internal_id is not None and int(remote_internal_id) != payment.id:
+            return False
+        if remote_user_id is not None and int(remote_user_id) != user_id:
+            return False
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
 async def _resolve_free_access_flow(
     session: AsyncSession, user_id: int, now: datetime
 ) -> int | None:
@@ -81,6 +95,22 @@ async def _send_personal_payment_link(
     )
     await session.commit()
 
+    latest_membership = await membership_repo.get_latest_membership(session, user.id)
+    if (
+        latest_membership is not None
+        and latest_membership.status != MembershipStatus.ACTIVE
+    ):
+        last_flow = await flow_repo.get_flow_by_id(session, latest_membership.flow_id)
+        if (
+            last_flow is not None
+            and last_flow.is_free
+            and latest_membership.pay_later_used_at is None
+        ):
+            await responder.answer(
+                "Бесплатный поток уже завершен, а отсрочка не была оформлена вовремя.\n"
+                "Сейчас доступ можно получить только после оплаты полной стоимости."
+            )
+
     price = await calculate_price_rub(session, user_id=user.id, paid_at=now)
     if price <= 0:
         flow_id = await _resolve_free_access_flow(session, user.id, now)
@@ -117,30 +147,43 @@ async def _send_personal_payment_link(
         adapter = YooKassaAdapter()
         try:
             remote = await adapter.get_payment(existing_pending.external_id)
-            remote_status = remote.get("status")
-            if remote_status == "succeeded":
-                await confirm_payment(
-                    session, responder.bot, existing_pending, paid_at=now
+            if not _metadata_matches_payment(remote, existing_pending, user.id):
+                await responder.answer(
+                    "Не удалось безопасно подтвердить принадлежность счета. Создаю новый платеж."
                 )
-                await session.commit()
-                return
-            if remote_status in ("canceled", "expired"):
                 existing_pending.status = PaymentStatus.FAILED
                 await session.commit()
-            elif remote_status == "pending":
-                conf = remote.get("confirmation", {})
-                url = conf.get("confirmation_url")
-                if url:
-                    keyboard = types.InlineKeyboardMarkup(
-                        inline_keyboard=[
-                            [types.InlineKeyboardButton(text="🔗 Оплатить", url=url)]
-                        ]
+            else:
+                remote_status = remote.get("status")
+                if remote_status == "succeeded":
+                    await confirm_payment(
+                        session, responder.bot, existing_pending, paid_at=now
                     )
-                    await responder.answer(
-                        f"У вас уже есть активный счёт на {price} ₽",
-                        reply_markup=keyboard,
-                    )
+                    await session.commit()
                     return
+                if remote_status in ("canceled", "expired"):
+                    existing_pending.status = PaymentStatus.FAILED
+                    await session.commit()
+                elif remote_status == "pending":
+                    conf = remote.get("confirmation", {})
+                    url = conf.get("confirmation_url")
+                    if url:
+                        keyboard = types.InlineKeyboardMarkup(
+                            inline_keyboard=[
+                                [types.InlineKeyboardButton(text="🔗 Оплатить", url=url)],
+                                [
+                                    types.InlineKeyboardButton(
+                                        text="✅ Я уже оплатила, проверить",
+                                        callback_data="payment:refresh",
+                                    )
+                                ],
+                            ]
+                        )
+                        await responder.answer(
+                            f"У вас уже есть активный счёт на {price} ₽",
+                            reply_markup=keyboard,
+                        )
+                        return
         except Exception:
             pass
 
@@ -362,6 +405,103 @@ async def shop_order_intro(callback: types.CallbackQuery, session: AsyncSession)
 @router.callback_query(lambda c: c.data == "shop:order:renewal")
 async def shop_order_renewal(callback: types.CallbackQuery, session: AsyncSession) -> None:
     await _send_personal_payment_link(session, callback.from_user, callback.message)
+    await callback.answer()
+
+
+@router.callback_query(lambda c: c.data == "payment:refresh")
+async def payment_refresh_handler(
+    callback: types.CallbackQuery, session: AsyncSession
+) -> None:
+    now = datetime.now(timezone.utc)
+    user = await get_or_create_user(
+        session=session,
+        tg_id=callback.from_user.id,
+        username=callback.from_user.username,
+        first_name=callback.from_user.first_name,
+        last_name=callback.from_user.last_name,
+        is_admin=callback.from_user.id in settings.admin_tg_ids,
+    )
+    await session.commit()
+
+    pending_payment = (
+        await session.execute(
+            select(Payment)
+            .where(Payment.user_id == user.id)
+            .where(Payment.status == PaymentStatus.PENDING)
+            .where(Payment.external_id.is_not(None))
+            .where(Payment.expires_at > now)
+            .order_by(Payment.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if pending_payment is None:
+        await callback.message.answer(
+            "Активных счетов не найдено. Нажмите «💳 Моя оплата», чтобы создать новый."
+        )
+        await callback.answer()
+        return
+
+    adapter = YooKassaAdapter()
+    try:
+        remote = await adapter.get_payment(pending_payment.external_id)
+    except Exception:
+        await callback.message.answer(
+            "Не удалось проверить статус платежа. Попробуйте еще раз через 1 минуту."
+        )
+        await callback.answer()
+        return
+
+    remote_status = remote.get("status")
+    if not _metadata_matches_payment(remote, pending_payment, user.id):
+        pending_payment.status = PaymentStatus.FAILED
+        await session.commit()
+        await callback.message.answer(
+            "Не удалось безопасно подтвердить принадлежность счета. Создаю новый платеж..."
+        )
+        await _send_personal_payment_link(session, callback.from_user, callback.message)
+        await callback.answer()
+        return
+
+    if remote_status == "succeeded":
+        await confirm_payment(session, callback.message.bot, pending_payment, paid_at=now)
+        await session.commit()
+        await callback.answer("Оплата подтверждена")
+        return
+
+    if remote_status in ("canceled", "expired"):
+        pending_payment.status = PaymentStatus.FAILED
+        await session.commit()
+        await callback.message.answer(
+            "Этот счет уже неактивен. Создаю новый платеж..."
+        )
+        await _send_personal_payment_link(session, callback.from_user, callback.message)
+        await callback.answer()
+        return
+
+    conf = remote.get("confirmation", {})
+    url = conf.get("confirmation_url")
+    if remote_status == "pending" and url:
+        keyboard = types.InlineKeyboardMarkup(
+            inline_keyboard=[
+                [types.InlineKeyboardButton(text="🔗 Оплатить", url=url)],
+                [
+                    types.InlineKeyboardButton(
+                        text="✅ Я уже оплатила, проверить",
+                        callback_data="payment:refresh",
+                    )
+                ],
+            ]
+        )
+        await callback.message.answer(
+            "Оплата еще не подтверждена банком. Если уже оплатили, нажмите проверку еще раз через 30-60 секунд.",
+            reply_markup=keyboard,
+        )
+        await callback.answer()
+        return
+
+    await callback.message.answer(
+        "Статус платежа пока не распознан. Нажмите «💳 Моя оплата» для повторной проверки."
+    )
     await callback.answer()
 
 
