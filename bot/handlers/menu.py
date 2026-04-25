@@ -431,7 +431,8 @@ async def shop_free_detail(callback: types.CallbackQuery, session: AsyncSession)
     free_desc = await get_text(session, "shop_free_desc")
     await callback.message.answer(
         f"{free_desc} — {free_label}\n"
-        "Для участия используйте кнопку «🎟 Получить доступ»."
+        "Бесплатный вход открывается только в объявленные даты. "
+        "Участие в платном потоке — через «🛍 Тарифы» или «💳 Моя оплата»."
     )
     await callback.answer()
 
