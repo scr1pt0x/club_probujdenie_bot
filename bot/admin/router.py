@@ -151,13 +151,17 @@ def _format_flow_block(title: str, flow, now: datetime) -> str:
 
 
 async def _get_current_flow(session: AsyncSession, now: datetime):
-    flow = await flow_repo.get_active_free_flow(session, now)
-    if flow is None:
-        flow = await flow_repo.get_active_paid_flow(session, now)
-    return flow
+    if settings.free_flows_enabled:
+        flow = await flow_repo.get_active_free_flow(session, now)
+        if flow is None:
+            flow = await flow_repo.get_active_paid_flow(session, now)
+        return flow
+    return await flow_repo.get_active_paid_flow(session, now)
 
 
 async def _get_next_flow(session: AsyncSession, now: datetime):
+    if not settings.free_flows_enabled:
+        return await flow_repo.get_next_paid_flow(session, now)
     next_free = await flow_repo.get_next_free_flow(session, now)
     next_paid = await flow_repo.get_next_paid_flow(session, now)
     if next_free and next_paid:
@@ -172,15 +176,22 @@ async def _show_flows_screen(
     current_flow = await _get_current_flow(session, now)
     next_flow = await _get_next_flow(session, now)
 
-    free_flow = await flow_repo.get_active_free_flow(session, now)
-    if free_flow is None:
-        free_flow = await flow_repo.get_next_free_flow(session, now)
     can_create_paid = False
-    if free_flow:
-        next_paid = await flow_repo.get_next_paid_flow(
-            session, free_flow.end_at + timedelta(days=1)
-        )
-        can_create_paid = next_paid is None
+    if settings.free_flows_enabled:
+        free_flow = await flow_repo.get_active_free_flow(session, now)
+        if free_flow is None:
+            free_flow = await flow_repo.get_next_free_flow(session, now)
+        if free_flow:
+            next_paid = await flow_repo.get_next_paid_flow(
+                session, free_flow.end_at + timedelta(days=1)
+            )
+            can_create_paid = next_paid is None
+    else:
+        latest_paid = await flow_repo.get_latest_paid_flow(session)
+        if latest_paid is not None:
+            anchor = latest_paid.end_at + timedelta(days=1)
+            existing = await flow_repo.get_next_paid_flow(session, anchor)
+            can_create_paid = existing is None
 
     text = "\n\n".join(
         [
@@ -736,15 +747,26 @@ async def admin_section(
             await callback.answer()
             return
         if len(parts) == 2 and parts[1] == "create_paid":
-            now = datetime.now(timezone.utc)
-            free_flow = await flow_repo.get_active_free_flow(session, now)
-            if free_flow is None:
-                free_flow = await flow_repo.get_next_free_flow(session, now)
-            if free_flow is None:
-                await callback.message.answer("Бесплатный поток не найден.")
-                await callback.answer()
-                return
-            start_at = free_flow.end_at + timedelta(days=1)
+            if settings.free_flows_enabled:
+                now = datetime.now(timezone.utc)
+                free_flow = await flow_repo.get_active_free_flow(session, now)
+                if free_flow is None:
+                    free_flow = await flow_repo.get_next_free_flow(session, now)
+                if free_flow is None:
+                    await callback.message.answer("Бесплатный поток не найден.")
+                    await callback.answer()
+                    return
+                start_at = free_flow.end_at + timedelta(days=1)
+            else:
+                latest_paid = await flow_repo.get_latest_paid_flow(session)
+                if latest_paid is None:
+                    await callback.message.answer(
+                        "Нет платных потоков в базе. Задайте первый через PAID_FLOW_START "
+                        "и перезапустите бота (сидер), либо добавьте поток вручную в БД."
+                    )
+                    await callback.answer()
+                    return
+                start_at = latest_paid.end_at + timedelta(days=1)
             existing_paid = await flow_repo.get_next_paid_flow(session, start_at)
             if existing_paid:
                 await callback.message.answer("Следующий платный поток уже создан.")

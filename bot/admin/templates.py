@@ -8,6 +8,9 @@ DEFAULT_TEMPLATES: dict[str, str] = {
     "access_already_in": "Вы уже участвуете в текущем потоке.",
     "sales_not_open": "Набор ещё не открыт.",
     "sales_closed": "Набор в бесплатный поток закрыт.",
+    "free_access_disabled": (
+        "Бесплатный вход не проводится. Оформите участие через «🛍 Тарифы» или «💳 Моя оплата»."
+    ),
     "pay_unavailable": "Оплата скоро будет подключена. Сейчас тестовый режим.",
     "pay_later_unavailable": "Опция «Оплачу позже» сейчас недоступна.",
     "payment_success": (
@@ -119,6 +122,7 @@ TEMPLATE_LABELS: dict[str, str] = {
     "access_already_in": "✅ Уже участвуете",
     "sales_not_open": "⏳ Набор ещё не открыт",
     "sales_closed": "⛔ Набор закрыт",
+    "free_access_disabled": "⛔ Бесплатный вход отключён",
     "pay_unavailable": "💳 Оплата",
     "pay_later_unavailable": "⏳ Оплачу позже — недоступно",
     "payment_success": "💳 Оплата — успех",

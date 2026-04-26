@@ -29,8 +29,12 @@ class Settings:
     pay_later_max_days: int = int(_get_env("PAY_LATER_MAX_DAYS", "7"))
 
     # Flow dates (UTC)
+    free_flows_enabled: bool = (
+        _get_env("FREE_FLOWS_ENABLED", "true").lower() == "true"
+    )
     free_flow_start: str = _get_env("FREE_FLOW_START", "2026-03-02")
     free_flow_end: str = _get_env("FREE_FLOW_END", "2026-03-29")
+    paid_flow_start: str = _get_env("PAID_FLOW_START", "2026-03-30")
     next_paid_flow_sales_open: str = _get_env("NEXT_PAID_FLOW_SALES_OPEN", "2026-03-23")
 
     # Mailings

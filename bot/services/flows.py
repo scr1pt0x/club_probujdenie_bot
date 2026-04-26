@@ -18,27 +18,26 @@ def sales_window_for_start(start_at: datetime) -> tuple[datetime, datetime]:
 
 
 async def ensure_seed_flows(session: AsyncSession) -> None:
-    free_start = parse_utc_date(settings.free_flow_start)
-    free_end = parse_utc_date(settings.free_flow_end)
-    open_at, close_at = sales_window_for_start(free_start)
+    if settings.free_flows_enabled:
+        free_start = parse_utc_date(settings.free_flow_start)
+        free_end = parse_utc_date(settings.free_flow_end)
+        open_at, close_at = sales_window_for_start(free_start)
 
-    result = await flow_repo.get_flow_by_start(session, free_start, True)
-    if result is None:
-        session.add(
-            Flow(
-                title="Бесплатный поток",
-                start_at=free_start,
-                end_at=free_end,
-                duration_weeks=4,
-                is_free=True,
-                sales_open_at=open_at,
-                sales_close_at=close_at,
+        result = await flow_repo.get_flow_by_start(session, free_start, True)
+        if result is None:
+            session.add(
+                Flow(
+                    title="Бесплатный поток",
+                    start_at=free_start,
+                    end_at=free_end,
+                    duration_weeks=4,
+                    is_free=True,
+                    sales_open_at=open_at,
+                    sales_close_at=close_at,
+                )
             )
-        )
 
-
-    # Фиксировано по согласованию с заказчиком: старт платного потока 2026-03-30 (UTC).
-    paid_start = parse_utc_date("2026-03-30")
+    paid_start = parse_utc_date(settings.paid_flow_start)
     paid_end = paid_start + timedelta(weeks=5)
     paid_open, paid_close = sales_window_for_start(paid_start)
 

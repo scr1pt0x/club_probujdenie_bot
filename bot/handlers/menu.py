@@ -112,19 +112,20 @@ async def _resolve_free_access_flow(
             return active_paid.id
         return active_membership.flow_id
 
-    # Новые участницы: сначала платный поток, если его нет — бесплатный.
+    # Новые участницы: сначала платный поток; при включённых бесплатных — затем бесплатный.
     next_paid = await flow_repo.get_next_paid_flow(session, now)
     if next_paid:
         return next_paid.id
     active_paid = await flow_repo.get_active_paid_flow(session, now)
     if active_paid:
         return active_paid.id
-    next_free = await flow_repo.get_next_free_flow(session, now)
-    if next_free:
-        return next_free.id
-    active_free = await flow_repo.get_active_free_flow(session, now)
-    if active_free:
-        return active_free.id
+    if settings.free_flows_enabled:
+        next_free = await flow_repo.get_next_free_flow(session, now)
+        if next_free:
+            return next_free.id
+        active_free = await flow_repo.get_active_free_flow(session, now)
+        if active_free:
+            return active_free.id
     return None
 
 
@@ -298,30 +299,32 @@ def _format_price(value: int) -> str:
 
 
 def _shop_menu_kb(
-    prices: dict[str, int], free_label: str
+    prices: dict[str, int], free_label: str, *, include_free_offer: bool
 ) -> types.InlineKeyboardMarkup:
-    return types.InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                types.InlineKeyboardButton(
-                    text=f"💳 Оплатить {_format_price(prices['intro'])} ₽",
-                    callback_data="shop:pay:intro",
-                )
-            ],
-            [
-                types.InlineKeyboardButton(
-                    text=f"💳 Оплатить {_format_price(prices['renewal'])} ₽",
-                    callback_data="shop:pay:renewal",
-                )
-            ],
+    rows: list[list[types.InlineKeyboardButton]] = [
+        [
+            types.InlineKeyboardButton(
+                text=f"💳 Оплатить {_format_price(prices['intro'])} ₽",
+                callback_data="shop:pay:intro",
+            )
+        ],
+        [
+            types.InlineKeyboardButton(
+                text=f"💳 Оплатить {_format_price(prices['renewal'])} ₽",
+                callback_data="shop:pay:renewal",
+            )
+        ],
+    ]
+    if include_free_offer:
+        rows.append(
             [
                 types.InlineKeyboardButton(
                     text=f"🎁 Бесплатный поток {free_label}",
                     callback_data="shop:free",
                 )
-            ],
-        ]
-    )
+            ]
+        )
+    return types.InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def _shop_checkout_kb(key: str, price_text: str) -> types.InlineKeyboardMarkup:
@@ -372,12 +375,18 @@ async def shop_handler(message: types.Message, session: AsyncSession) -> None:
     intro_desc = await get_text(session, "shop_intro_desc")
     renewal_desc = await get_text(session, "shop_renewal_desc")
     free_desc = await get_text(session, "shop_free_desc")
+    lines = [
+        f"{title}",
+        f"- {intro_desc} — {_format_price(prices['intro'])} ₽",
+        f"- {renewal_desc} — {_format_price(prices['renewal'])} ₽",
+    ]
+    if settings.free_flows_enabled:
+        lines.append(f"- {free_desc} — {free_label}")
     await message.answer(
-        f"{title}\n"
-        f"- {intro_desc} — {_format_price(prices['intro'])} ₽\n"
-        f"- {renewal_desc} — {_format_price(prices['renewal'])} ₽\n"
-        f"- {free_desc} — {free_label}",
-        reply_markup=_shop_menu_kb(prices, free_label),
+        "\n".join(lines),
+        reply_markup=_shop_menu_kb(
+            prices, free_label, include_free_offer=settings.free_flows_enabled
+        ),
     )
 
 
@@ -427,6 +436,10 @@ async def shop_renewal_detail(callback: types.CallbackQuery, session: AsyncSessi
 
 @router.callback_query(lambda c: c.data == "shop:free")
 async def shop_free_detail(callback: types.CallbackQuery, session: AsyncSession) -> None:
+    if not settings.free_flows_enabled:
+        await callback.message.answer(await get_text(session, "free_access_disabled"))
+        await callback.answer()
+        return
     free_label = await get_shop_free_label(session)
     free_desc = await get_text(session, "shop_free_desc")
     await callback.message.answer(
@@ -577,6 +590,9 @@ async def payment_refresh_handler(
 
 @router.message(lambda m: m.text == "🎟 Получить доступ")
 async def access_handler(message: types.Message, session: AsyncSession) -> None:
+    if not settings.free_flows_enabled:
+        await message.answer(await get_text(session, "free_access_disabled"))
+        return
     now = datetime.now(timezone.utc)
     user = await get_or_create_user(
         session=session,
@@ -674,13 +690,18 @@ async def schedule_handler(
     message: types.Message, session: AsyncSession
 ) -> None:
     now = datetime.now(timezone.utc)
-    flow = await flow_repo.get_active_free_flow(session, now)
-    if flow is None:
+    if settings.free_flows_enabled:
+        flow = await flow_repo.get_active_free_flow(session, now)
+        if flow is None:
+            flow = await flow_repo.get_active_paid_flow(session, now)
+        if flow is None:
+            flow = await flow_repo.get_next_free_flow(session, now)
+        if flow is None:
+            flow = await get_next_paid_flow(session, now)
+    else:
         flow = await flow_repo.get_active_paid_flow(session, now)
-    if flow is None:
-        flow = await flow_repo.get_next_free_flow(session, now)
-    if flow is None:
-        flow = await get_next_paid_flow(session, now)
+        if flow is None:
+            flow = await get_next_paid_flow(session, now)
 
     if flow is None:
         await message.answer("Расписание пока недоступно.")
