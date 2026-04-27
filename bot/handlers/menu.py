@@ -66,6 +66,28 @@ async def _find_paid_payment_with_active_flow(
     return result.scalars().first()
 
 
+async def _should_offer_renewal_checkout(
+    session: AsyncSession, user_id: int, now: datetime
+) -> bool:
+    """
+    True — показать оплату продления: есть следующий платный поток, набор открыт,
+    по нему ещё нет подтверждённой оплаты.
+    """
+    next_paid = await flow_repo.get_next_paid_flow(session, now)
+    if next_paid is None:
+        return False
+    paid_next = await session.execute(
+        select(Payment.id)
+        .where(Payment.user_id == user_id)
+        .where(Payment.flow_id == next_paid.id)
+        .where(Payment.status == PaymentStatus.PAID)
+        .limit(1)
+    )
+    if paid_next.scalar_one_or_none() is not None:
+        return False
+    return next_paid.sales_open_at <= now <= next_paid.sales_close_at
+
+
 async def _close_duplicate_pending_payments(
     session: AsyncSession, user_id: int, now: datetime
 ) -> None:
@@ -143,14 +165,14 @@ async def _send_personal_payment_link(
     )
     await session.commit()
 
-    # If payment was already completed for current/future paid flow,
-    # resend links immediately and do not create a new invoice.
-    already_paid = await _find_paid_payment_with_active_flow(session, user.id, now)
-    if already_paid is not None:
-        await _close_duplicate_pending_payments(session, user.id, now)
-        await session.commit()
-        await _send_paid_access_links(session, responder, tg_user.id)
-        return
+    # Оплата за текущий ещё действующий поток: обычно только повторяем ссылки.
+    # Исключение: открыт набор в следующем потоке и за него ещё не платили — выставляем продление.
+    if await _find_paid_payment_with_active_flow(session, user.id, now) is not None:
+        if not await _should_offer_renewal_checkout(session, user.id, now):
+            await _close_duplicate_pending_payments(session, user.id, now)
+            await session.commit()
+            await _send_paid_access_links(session, responder, tg_user.id)
+            return
 
     latest_membership = await membership_repo.get_latest_membership(session, user.id)
     if (
