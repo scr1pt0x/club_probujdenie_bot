@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from aiogram import Router, types
 from aiogram.fsm.context import FSMContext
@@ -66,6 +67,18 @@ async def _find_paid_payment_with_active_flow(
     return result.scalars().first()
 
 
+def _now_within_flow_sales_window_local(flow: Flow, now: datetime) -> bool:
+    """
+    Окно набора по календарю в SCHEDULER_TZ (как авторассылки), а не строго utc-инстанты,
+    иначе утром по местному времени уже «пора оплатить», а в UTC ещё «набор закрыт».
+    """
+    tz = ZoneInfo(settings.scheduler_timezone)
+    today_local = now.astimezone(tz).date()
+    open_local = flow.sales_open_at.astimezone(tz).date()
+    close_local = flow.sales_close_at.astimezone(tz).date()
+    return open_local <= today_local <= close_local
+
+
 async def _should_offer_renewal_checkout(
     session: AsyncSession, user_id: int, now: datetime
 ) -> bool:
@@ -85,7 +98,7 @@ async def _should_offer_renewal_checkout(
     )
     if paid_next.scalar_one_or_none() is not None:
         return False
-    return next_paid.sales_open_at <= now <= next_paid.sales_close_at
+    return _now_within_flow_sales_window_local(next_paid, now)
 
 
 async def _close_duplicate_pending_payments(
@@ -533,11 +546,18 @@ async def payment_refresh_handler(
         )
     ).scalar_one_or_none()
     if pending_payment is None:
-        already_paid = await _find_paid_payment_with_active_flow(session, user.id, now)
-        if already_paid is not None:
+        if await _find_paid_payment_with_active_flow(session, user.id, now) is not None:
+            if await _should_offer_renewal_checkout(session, user.id, now):
+                await _send_personal_payment_link(
+                    session, callback.from_user, callback.message
+                )
+                await callback.answer()
+                return
             await _close_duplicate_pending_payments(session, user.id, now)
             await session.commit()
-            await _send_paid_access_links(session, callback.message, callback.from_user.id)
+            await _send_paid_access_links(
+                session, callback.message, callback.from_user.id
+            )
             await callback.answer("Оплата уже подтверждена")
             return
         await callback.message.answer(
