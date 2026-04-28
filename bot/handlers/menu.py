@@ -67,16 +67,20 @@ async def _find_paid_payment_with_active_flow(
     return result.scalars().first()
 
 
-def _now_within_flow_sales_window_local(flow: Flow, now: datetime) -> bool:
+def _renewal_period_open(flow: Flow, now: datetime) -> bool:
     """
-    Окно набора по календарю в SCHEDULER_TZ (как авторассылки), а не строго utc-инстанты,
-    иначе утром по местному времени уже «пора оплатить», а в UTC ещё «набор закрыт».
+    Разрешаем продление с календарной даты «за 7 дней до старта» (как рассылки -7)
+    до конца окна продаж — без привязки к часу sales_open_at в UTC.
+
+    Иначе сообщение «платите» и кнопка «Моя оплата» могут расходиться с полем
+    sales_open/sales_close, посчитанным от utc-старта пока есть сдвиг по дню.
     """
     tz = ZoneInfo(settings.scheduler_timezone)
     today_local = now.astimezone(tz).date()
-    open_local = flow.sales_open_at.astimezone(tz).date()
+    start_local = flow.start_at.astimezone(tz).date()
     close_local = flow.sales_close_at.astimezone(tz).date()
-    return open_local <= today_local <= close_local
+    from_date = start_local - timedelta(days=7)
+    return from_date <= today_local <= close_local
 
 
 async def _should_offer_renewal_checkout(
@@ -98,7 +102,7 @@ async def _should_offer_renewal_checkout(
     )
     if paid_next.scalar_one_or_none() is not None:
         return False
-    return _now_within_flow_sales_window_local(next_paid, now)
+    return _renewal_period_open(next_paid, now)
 
 
 async def _close_duplicate_pending_payments(
