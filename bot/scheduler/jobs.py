@@ -243,13 +243,14 @@ async def check_pending_payments(
                 await confirm_payment(session, bot, payment, paid_at=now)
             elif status == PaymentStatus.FAILED:
                 payment.status = PaymentStatus.FAILED
-                await notify_payment_status(
-                    session,
-                    bot,
-                    payment.user_id,
-                    "payment_failed",
-                    dedupe_key=f"payment:{payment.id}:payment_failed",
-                )
+                if _expiration_notice_is_timely(payment, now):
+                    await notify_payment_status(
+                        session,
+                        bot,
+                        payment.user_id,
+                        "payment_failed",
+                        dedupe_key=f"payment:{payment.id}:payment_failed",
+                    )
             elif status == PaymentStatus.EXPIRED:
                 payment.status = PaymentStatus.EXPIRED
                 if _expiration_notice_is_timely(payment, now):
