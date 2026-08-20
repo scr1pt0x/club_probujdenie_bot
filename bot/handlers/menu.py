@@ -39,7 +39,7 @@ from bot.services.settings import (
 )
 from bot.services.texts import get_text
 from bot.ui.formatters import format_flow_period, format_local_date, format_price_rub
-from bot.ui.keyboards import back_home_kb, main_menu_kb
+from bot.ui.keyboards import access_links_kb, back_home_kb, main_menu_kb
 from bot.ui.navigation import (
     ScreenResponder,
     edit_saved_screen,
@@ -168,7 +168,7 @@ async def _send_paid_access_links(
     session: AsyncSession, responder: ScreenResponder, tg_id: int
 ) -> None:
     links = await grant_access(responder.bot, tg_id)
-    kb = _access_links_kb(links.channel_link, links.group_link)
+    kb = access_links_kb(links.channel_link, links.group_link)
     if kb is None:
         await responder.answer("Оплата уже подтверждена. Доступ активирован.")
         return
@@ -272,7 +272,7 @@ async def _send_personal_payment_link(
             session, responder.bot, payment, paid_at=now, notify_user=False
         )
         await session.commit()
-        kb = _access_links_kb(
+        kb = access_links_kb(
             links.channel_link if links else None,
             links.group_link if links else None,
         )
@@ -316,7 +316,7 @@ async def _send_personal_payment_link(
                         notify_user=False,
                     )
                     await session.commit()
-                    kb = _access_links_kb(
+                    kb = access_links_kb(
                         links.channel_link if links else None,
                         links.group_link if links else None,
                     )
@@ -526,20 +526,6 @@ def _shop_menu_kb(
     return types.InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def _shop_checkout_kb(key: str, price_text: str) -> types.InlineKeyboardMarkup:
-    return types.InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                types.InlineKeyboardButton(
-                    text=f"💳 Оплатить {price_text}",
-                    callback_data=f"shop:checkout:{key}",
-                )
-            ],
-            [types.InlineKeyboardButton(text="← Назад", callback_data="nav:shop")],
-        ]
-    )
-
-
 def _shop_order_kb(order_key: str) -> types.InlineKeyboardMarkup:
     return types.InlineKeyboardMarkup(
         inline_keyboard=[
@@ -551,26 +537,6 @@ def _shop_order_kb(order_key: str) -> types.InlineKeyboardMarkup:
             [types.InlineKeyboardButton(text="← Назад", callback_data="nav:shop")],
         ]
     )
-
-
-def _access_links_kb(
-    channel_link: str | None, group_link: str | None
-) -> types.InlineKeyboardMarkup | None:
-    rows: list[list[types.InlineKeyboardButton]] = []
-    if channel_link:
-        rows.append(
-            [types.InlineKeyboardButton(text="📢 Войти в канал", url=channel_link)]
-        )
-    if group_link:
-        rows.append(
-            [types.InlineKeyboardButton(text="💬 Войти в группу", url=group_link)]
-        )
-    if not rows:
-        return None
-    rows.append(
-        [types.InlineKeyboardButton(text="← Главное меню", callback_data="nav:home")]
-    )
-    return types.InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 async def _shop_content(
@@ -855,7 +821,7 @@ async def payment_refresh_handler(
             notify_user=False,
         )
         await session.commit()
-        kb = _access_links_kb(
+        kb = access_links_kb(
             links.channel_link if links else None,
             links.group_link if links else None,
         )
@@ -1000,7 +966,7 @@ async def access_handler(message: types.Message, session: AsyncSession) -> None:
     await session.commit()
     links = await grant_access(message.bot, message.from_user.id)
     text = await get_text(session, "access_granted_free")
-    kb = _access_links_kb(links.channel_link, links.group_link)
+    kb = access_links_kb(links.channel_link, links.group_link)
     if kb is None:
         await responder.answer(text, reply_markup=back_home_kb())
         return

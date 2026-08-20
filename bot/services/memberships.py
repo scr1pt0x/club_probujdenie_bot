@@ -58,10 +58,6 @@ async def upsert_membership_for_flow(
     return membership
 
 
-def mark_membership_expired(membership: Membership) -> None:
-    membership.status = MembershipStatus.EXPIRED
-
-
 async def apply_pay_later(
     session: AsyncSession, user_id: int, now: datetime
 ) -> tuple[bool, str]:

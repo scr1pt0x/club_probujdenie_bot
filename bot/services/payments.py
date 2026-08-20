@@ -14,28 +14,9 @@ from bot.services import memberships as membership_service
 from bot.services.promos import apply_promo_to_price
 from bot.services.settings import get_effective_settings
 from bot.services.texts import get_text
+from bot.ui.keyboards import access_links_kb
 
 logger = logging.getLogger(__name__)
-
-
-def _access_links_kb(
-    channel_link: str | None, group_link: str | None
-) -> types.InlineKeyboardMarkup | None:
-    rows: list[list[types.InlineKeyboardButton]] = []
-    if channel_link:
-        rows.append(
-            [types.InlineKeyboardButton(text="📢 Войти в канал", url=channel_link)]
-        )
-    if group_link:
-        rows.append(
-            [types.InlineKeyboardButton(text="💬 Войти в группу", url=group_link)]
-        )
-    if not rows:
-        return None
-    rows.append(
-        [types.InlineKeyboardButton(text="Открыть меню", callback_data="nav:home")]
-    )
-    return types.InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 async def _notify_success_with_links_fallback(
@@ -46,7 +27,7 @@ async def _notify_success_with_links_fallback(
     group_link: str | None,
     dedupe_key: str | None = None,
 ) -> None:
-    kb = _access_links_kb(channel_link, group_link)
+    kb = access_links_kb(channel_link, group_link)
     template_key = "payment_success" if kb is not None else "payment_success_no_links"
     await notify_payment_status(
         session,
@@ -227,56 +208,3 @@ async def confirm_payment(
         membership.pay_later_deadline_at = None
         membership.pay_later_used_at = None
     return links
-
-
-async def manual_confirm_payment(
-    session: AsyncSession,
-    bot: Bot,
-    payment: Payment,
-    flow_id: int,
-    paid_at: datetime | None = None,
-) -> None:
-    paid_at = paid_at or datetime.now(timezone.utc)
-    flow = await flow_repo.get_flow_by_id(session, flow_id)
-    if flow is None:
-        payment.status = PaymentStatus.NEEDS_REVIEW
-        logger.error(
-            "Manual confirm failed: flow not found",
-            extra={"payment_id": payment.id, "flow_id": flow_id},
-        )
-        await notify_payment_status(
-            session,
-            bot,
-            payment.user_id,
-            "payment_needs_review",
-            dedupe_key=f"payment:{payment.id}:payment_needs_review",
-        )
-        return
-
-    payment.status = PaymentStatus.PAID
-    payment.paid_at = paid_at
-    payment.flow_id = flow_id
-
-    membership = await membership_service.upsert_membership_for_flow(
-        session=session,
-        user_id=payment.user_id,
-        flow_id=flow_id,
-        access_start_at=flow.start_at,
-        access_end_at=flow.end_at,
-        payment=payment,
-    )
-
-    user = await user_repo.get_user_by_id(session, payment.user_id)
-    if user:
-        links = await grant_access(bot, user.tg_id)
-        await _notify_success_with_links_fallback(
-            session,
-            bot,
-            payment.user_id,
-            links.channel_link,
-            links.group_link,
-            dedupe_key=f"payment:{payment.id}:payment_success",
-        )
-    if membership.pay_later_deadline_at:
-        membership.pay_later_deadline_at = None
-        membership.pay_later_used_at = None

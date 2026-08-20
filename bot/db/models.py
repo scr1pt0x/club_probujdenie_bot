@@ -169,30 +169,6 @@ class Payment(Base):
     flow: Mapped[Optional["Flow"]] = relationship(back_populates="payments")
 
 
-class Promo(Base):
-    __tablename__ = "promos"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    code: Mapped[str] = mapped_column(String(64), unique=True)
-    description: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
-    flow_id: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("flows.id"), nullable=True
-    )
-    starts_at: Mapped[Optional[datetime]] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    ends_at: Mapped[Optional[datetime]] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utcnow
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=utcnow, onupdate=utcnow
-    )
-
-
 class PromoCode(Base):
     __tablename__ = "promo_codes"
 

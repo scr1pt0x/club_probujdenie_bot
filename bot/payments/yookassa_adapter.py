@@ -4,7 +4,6 @@ from decimal import Decimal
 
 import httpx
 
-from bot.db.models import PaymentStatus
 from config import settings
 
 logger = logging.getLogger(__name__)
@@ -61,12 +60,3 @@ class YooKassaAdapter:
             )
             response.raise_for_status()
             return response.json()
-
-    async def get_payment_status(self, external_id: str) -> PaymentStatus:
-        data = await self.get_payment(external_id)
-        status = data.get("status")
-        if status == "succeeded":
-            return PaymentStatus.PAID
-        if status == "canceled":
-            return PaymentStatus.FAILED
-        return PaymentStatus.PENDING

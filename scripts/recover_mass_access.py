@@ -72,7 +72,7 @@ async def recover_mass_access(
             try:
                 links = await grant_access(bot, user.tg_id)
                 restored += 1
-                kb = _links_kb(links.get("channel_link"), links.get("group_link"))
+                kb = _links_kb(links.channel_link, links.group_link)
                 await bot.send_message(user.tg_id, message_text, reply_markup=kb)
                 messaged += 1
                 if processed % 25 == 0:

@@ -70,16 +70,6 @@ async def get_latest_paid_flow(session: AsyncSession) -> Flow | None:
     return result.scalars().first()
 
 
-async def get_flow_in_sales_window(session: AsyncSession, now: datetime) -> Flow | None:
-    result = await session.execute(
-        select(Flow)
-        .where(Flow.sales_open_at <= now, Flow.sales_close_at >= now)
-        .order_by(Flow.start_at.asc())
-        .limit(1)
-    )
-    return result.scalars().first()
-
-
 async def get_paid_flow_in_sales_window(
     session: AsyncSession, now: datetime
 ) -> Flow | None:
