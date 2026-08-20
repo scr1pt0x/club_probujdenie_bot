@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import httpx
 
+from bot.access_control import service as access_service
 from bot.db.models import MembershipStatus
 from bot.handlers.menu import _shop_menu_kb
 from bot.payments.verification import validate_remote_payment
@@ -29,10 +30,12 @@ def test_price_and_date_formatters_are_user_friendly():
 
 
 def test_main_menu_exposes_status_and_keeps_primary_actions_first():
-    keyboard = main_menu_kb().keyboard
+    keyboard = main_menu_kb().inline_keyboard
     labels = [[button.text for button in row] for row in keyboard]
-    assert labels[0] == ["💳 Моя оплата", "👤 Мой статус"]
-    assert labels[-1] == ["ℹ️ Помощь"]
+    callbacks = [[button.callback_data for button in row] for row in keyboard]
+    assert labels[0] == ["💳 Оплата", "👤 Мой доступ"]
+    assert callbacks[0] == ["nav:payment", "nav:status"]
+    assert labels[-1] == ["💬 Помощь"]
 
 
 def test_long_telegram_messages_are_split_without_data_loss():
@@ -45,8 +48,52 @@ def test_long_telegram_messages_are_split_without_data_loss():
 def test_tariffs_have_one_personal_checkout_instead_of_conflicting_prices():
     keyboard = _shop_menu_kb("0 ₽", include_free_offer=False)
     buttons = keyboard.inline_keyboard
-    assert len(buttons) == 1
+    assert len(buttons) == 2
     assert buttons[0][0].callback_data == "shop:order:personal"
+    assert buttons[-1][0].callback_data == "nav:home"
+
+
+def test_grant_access_never_kicks_an_existing_member(monkeypatch):
+    calls = []
+
+    class FakeBot:
+        async def unban_chat_member(self, **kwargs):
+            calls.append(("unban", kwargs))
+
+        async def create_chat_invite_link(self, **kwargs):
+            calls.append(("invite", kwargs))
+            return SimpleNamespace(invite_link=f"https://t.me/+{kwargs['chat_id']}")
+
+    monkeypatch.setattr(
+        access_service,
+        "settings",
+        SimpleNamespace(primary_channel_id=-1001, secondary_discussion_id=-1002),
+    )
+    result = run(access_service.grant_access(FakeBot(), 42))
+
+    unbans = [kwargs for kind, kwargs in calls if kind == "unban"]
+    assert len(unbans) == 2
+    assert all(kwargs["only_if_banned"] is True for kwargs in unbans)
+    assert result.successful
+
+
+def test_revoke_access_never_removes_configured_administrator(monkeypatch):
+    class FailIfCalledBot:
+        async def ban_chat_member(self, **kwargs):
+            raise AssertionError("Telegram ban must not be called for an administrator")
+
+    monkeypatch.setattr(
+        access_service,
+        "settings",
+        SimpleNamespace(
+            primary_channel_id=-1001,
+            secondary_discussion_id=-1002,
+            admin_tg_ids=[42],
+        ),
+    )
+    result = run(access_service.revoke_access(FailIfCalledBot(), 42))
+    assert result.successful
+    assert result.protected
 
 
 def test_remote_payment_must_match_identity_amount_and_currency():

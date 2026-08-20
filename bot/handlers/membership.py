@@ -9,6 +9,8 @@ from bot.repositories import memberships as membership_repo
 from bot.repositories.users import get_or_create_user
 from bot.services.memberships import apply_pay_later, evaluate_pay_later
 from bot.ui.formatters import format_local_date
+from bot.ui.keyboards import back_home_kb
+from bot.ui.navigation import edit_screen, send_clean_screen
 from config import settings
 
 router = Router()
@@ -17,58 +19,79 @@ router = Router()
 def _pay_later_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="Оплатить позже", callback_data="pay_later")]
+            [
+                InlineKeyboardButton(
+                    text="Подтвердить отсрочку", callback_data="pay_later"
+                )
+            ],
+            [InlineKeyboardButton(text="← Главное меню", callback_data="nav:home")],
         ]
     )
 
 
-@router.message(Command("status"))
-@router.message(lambda m: m.text == "👤 Мой статус")
-async def status_handler(message: types.Message, session: AsyncSession) -> None:
+async def _status_content(
+    session: AsyncSession, tg_user: types.User
+) -> tuple[str, InlineKeyboardMarkup]:
     now = datetime.now(timezone.utc)
     user = await get_or_create_user(
         session=session,
-        tg_id=message.from_user.id,
-        username=message.from_user.username,
-        first_name=message.from_user.first_name,
-        last_name=message.from_user.last_name,
-        is_admin=message.from_user.id in settings.admin_tg_ids,
+        tg_id=tg_user.id,
+        username=tg_user.username,
+        first_name=tg_user.first_name,
+        last_name=tg_user.last_name,
+        is_admin=tg_user.id in settings.admin_tg_ids,
     )
     await session.commit()
     membership = await membership_repo.get_active_membership(session, user_id=user.id)
     text = (
-        "👤 Статус участия\n\n"
-        "Активного доступа сейчас нет.\n"
-        "Чтобы присоединиться, откройте «🛍 Тарифы»."
+        "👤 Мой доступ\n\n"
+        "Сейчас активного участия нет.\n"
+        "Откройте «✨ Участие», чтобы посмотреть условия."
     )
-    keyboard = None
+    keyboard = back_home_kb()
     if membership:
         if membership.access_end_at >= now:
             text = (
-                "👤 Статус участия\n\n"
-                "✅ Доступ активен\n"
-                f"Доступ до: {format_local_date(membership.access_end_at)}"
+                "👤 Мой доступ\n\n"
+                "✅ Активен\n"
+                f"До {format_local_date(membership.access_end_at)}"
             )
         elif membership.grace_end_at >= now:
             text = (
-                "👤 Статус участия\n\n"
-                "Доступ завершён. Сейчас ещё действует льготный период продления.\n"
-                "Льготная цена доступна до: "
+                "👤 Мой доступ\n\n"
+                "🕓 Основной период завершён\n"
+                "Льготное продление доступно до "
                 f"{format_local_date(membership.grace_end_at)}"
             )
 
         pay_later = await evaluate_pay_later(session, user.id, now)
         if pay_later.eligible:
             keyboard = _pay_later_keyboard()
+            text += "\n\nМожно оформить отсрочку оплаты."
         elif (
             membership.pay_later_deadline_at and membership.pay_later_deadline_at > now
         ):
             text += (
-                "\n⏳ Отсрочка до: "
+                "\n⏳ Отсрочка до "
                 f"{format_local_date(membership.pay_later_deadline_at)}"
             )
+    return text, keyboard
 
-    await message.answer(text, reply_markup=keyboard)
+
+@router.message(Command("status"))
+@router.message(lambda m: m.text == "👤 Мой статус")
+async def status_handler(message: types.Message, session: AsyncSession) -> None:
+    text, keyboard = await _status_content(session, message.from_user)
+    await send_clean_screen(message, text, reply_markup=keyboard)
+
+
+@router.callback_query(lambda c: c.data == "nav:status")
+async def status_navigation_handler(
+    callback: types.CallbackQuery, session: AsyncSession
+) -> None:
+    text, keyboard = await _status_content(session, callback.from_user)
+    await edit_screen(callback.message, text, reply_markup=keyboard)
+    await callback.answer()
 
 
 @router.callback_query(lambda c: c.data == "pay_later")
@@ -95,5 +118,9 @@ async def pay_later_handler(
         await callback.answer(text, show_alert=True)
         return
     await session.commit()
-    await callback.message.answer(text)
+    await edit_screen(
+        callback.message,
+        f"✅ {text}\n\nНе забудьте оплатить участие до этой даты.",
+        reply_markup=back_home_kb(),
+    )
     await callback.answer()

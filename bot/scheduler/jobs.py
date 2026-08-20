@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bot.access_control.service import revoke_access
 from bot.db.models import Flow, Membership, MembershipStatus, Payment, PaymentStatus
 from bot.payments.adapter import PaymentAdapter
+from bot.payments.verification import validate_remote_payment
 from bot.repositories import flows as flow_repo
 from bot.repositories import memberships as membership_repo
 from bot.repositories import payments as payment_repo
@@ -120,13 +121,20 @@ async def expire_memberships(session: AsyncSession, bot: Bot) -> None:
     if _is_mass_revoke_blocked("expire_memberships", len(revoke_user_ids)):
         return
 
-    for membership in memberships:
-        membership.status = MembershipStatus.EXPIRED
-
+    revoke_succeeded: dict[int, bool] = {}
     for user_id in revoke_user_ids:
         user = await user_repo.get_user_by_id(session, user_id)
-        if user:
-            await revoke_access(bot, user.tg_id)
+        if user is None:
+            revoke_succeeded[user_id] = True
+            continue
+        result = await revoke_access(bot, user.tg_id)
+        revoke_succeeded[user_id] = result.successful
+
+    for membership in memberships:
+        if membership.user_id not in revoke_user_ids or revoke_succeeded.get(
+            membership.user_id, False
+        ):
+            membership.status = MembershipStatus.EXPIRED
     await session.commit()
 
 
@@ -144,18 +152,28 @@ async def enforce_pay_later_deadlines(session: AsyncSession, bot: Bot) -> None:
         .where(Membership.pay_later_deadline_at <= now)
     )
     memberships = list(result.scalars().all())
-    if _is_mass_revoke_blocked("enforce_pay_later_deadlines", len(memberships)):
+    revoke_candidate_ids: set[int] = set()
+    for membership in memberships:
+        if not await _has_other_active_membership(
+            session, membership.user_id, membership.id, now
+        ):
+            revoke_candidate_ids.add(membership.user_id)
+    if _is_mass_revoke_blocked(
+        "enforce_pay_later_deadlines", len(revoke_candidate_ids)
+    ):
         return
     for membership in memberships:
-        membership.status = MembershipStatus.EXPIRED
         user = await user_repo.get_user_by_id(session, membership.user_id)
         if (
             user
             and user.id not in revoked_user_ids
-            and not await _has_other_active_membership(
-                session, membership.user_id, membership.id, now
-            )
+            and membership.user_id in revoke_candidate_ids
         ):
+            result = await revoke_access(bot, user.tg_id)
+            if not result.successful:
+                # Keep it active so the next scheduler run retries both chats.
+                continue
+            revoked_user_ids.add(user.id)
             try:
                 await bot.send_message(user.tg_id, revoke_text)
             except Exception:
@@ -166,8 +184,7 @@ async def enforce_pay_later_deadlines(session: AsyncSession, bot: Bot) -> None:
                         "membership_id": membership.id,
                     },
                 )
-            await revoke_access(bot, user.tg_id)
-            revoked_user_ids.add(user.id)
+        membership.status = MembershipStatus.EXPIRED
     await session.commit()
 
 
@@ -192,8 +209,8 @@ async def remove_non_renewed_on_flow_start(
         .where(Membership.pay_later_used_at.is_(None))
     )
     memberships = list(result.scalars().all())
-    if _is_mass_revoke_blocked("remove_non_renewed_on_flow_start", len(memberships)):
-        return
+    eligible_memberships: list[Membership] = []
+    revoke_candidate_ids: set[int] = set()
     for membership in memberships:
         target_membership = await membership_repo.get_membership_by_flow(
             session, user_id=membership.user_id, flow_id=flow.id
@@ -208,18 +225,31 @@ async def remove_non_renewed_on_flow_start(
             # for target flow has not been created yet.
             continue
 
+        eligible_memberships.append(membership)
+        if not await _has_other_active_membership(
+            session, membership.user_id, membership.id, now_utc
+        ):
+            revoke_candidate_ids.add(membership.user_id)
+
+    if _is_mass_revoke_blocked(
+        "remove_non_renewed_on_flow_start", len(revoke_candidate_ids)
+    ):
+        return
+
+    for membership in eligible_memberships:
         # Без отсрочки и оплаты удаляем в первый день нового потока.
-        membership.status = MembershipStatus.EXPIRED
         user = await user_repo.get_user_by_id(session, membership.user_id)
         if (
             user
             and user.id not in revoked_user_ids
-            and not await _has_other_active_membership(
-                session, membership.user_id, membership.id, now_utc
-            )
+            and membership.user_id in revoke_candidate_ids
         ):
-            await revoke_access(bot, user.tg_id)
+            result = await revoke_access(bot, user.tg_id)
+            if not result.successful:
+                # Keep it active so the next scheduler run retries.
+                continue
             revoked_user_ids.add(user.id)
+        membership.status = MembershipStatus.EXPIRED
     await session.commit()
 
 
@@ -236,9 +266,47 @@ async def check_pending_payments(
 ) -> None:
     now = datetime.now(timezone.utc)
     pending = await payment_repo.list_pending_payments(session)
-    for payment in pending:
+    for listed_payment in pending:
         try:
-            status = await adapter.get_payment_status(payment.external_id)
+            payment = await payment_repo.get_payment_by_external_id(
+                session, listed_payment.external_id
+            )
+            if payment is None or payment.status != PaymentStatus.PENDING:
+                continue
+            remote = await adapter.get_payment(payment.external_id)
+            validation_error = validate_remote_payment(
+                remote,
+                external_id=payment.external_id,
+                internal_payment_id=payment.id,
+                user_id=payment.user_id,
+                amount_rub=payment.amount_rub,
+                currency=payment.currency,
+            )
+            if validation_error:
+                payment.status = PaymentStatus.NEEDS_REVIEW
+                logger.error(
+                    "Pending payment verification mismatch",
+                    extra={
+                        "payment_id": payment.id,
+                        "external_id": payment.external_id,
+                        "reason": validation_error,
+                    },
+                )
+                await notify_payment_status(
+                    session,
+                    bot,
+                    payment.user_id,
+                    "payment_needs_review",
+                    dedupe_key=f"payment:{payment.id}:payment_needs_review",
+                )
+                await session.commit()
+                continue
+
+            remote_status = remote.get("status")
+            status = {
+                "succeeded": PaymentStatus.PAID,
+                "canceled": PaymentStatus.FAILED,
+            }.get(remote_status, PaymentStatus.PENDING)
             if status == PaymentStatus.PAID:
                 await confirm_payment(session, bot, payment, paid_at=now)
             elif status == PaymentStatus.FAILED:
@@ -252,16 +320,6 @@ async def check_pending_payments(
                         dedupe_key=f"payment:{payment.id}:payment_failed",
                     )
             elif status == PaymentStatus.EXPIRED:
-                payment.status = PaymentStatus.EXPIRED
-                if _expiration_notice_is_timely(payment, now):
-                    await notify_payment_status(
-                        session,
-                        bot,
-                        payment.user_id,
-                        "payment_expired",
-                        dedupe_key=f"payment:{payment.id}:payment_expired",
-                    )
-            elif now >= _pending_payment_deadline(payment):
                 payment.status = PaymentStatus.EXPIRED
                 if _expiration_notice_is_timely(payment, now):
                     await notify_payment_status(

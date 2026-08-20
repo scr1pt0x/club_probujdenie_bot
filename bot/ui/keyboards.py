@@ -1,17 +1,31 @@
-from aiogram.types import KeyboardButton, ReplyKeyboardMarkup
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 
-def main_menu_kb() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[
+def main_menu_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
             [
-                KeyboardButton(text="💳 Моя оплата"),
-                KeyboardButton(text="👤 Мой статус"),
+                InlineKeyboardButton(text="💳 Оплата", callback_data="nav:payment"),
+                InlineKeyboardButton(text="👤 Мой доступ", callback_data="nav:status"),
             ],
-            [KeyboardButton(text="🛍 Тарифы"), KeyboardButton(text="📅 Расписание")],
-            [KeyboardButton(text="⏳ Оплачу позже"), KeyboardButton(text="🏷 Промокод")],
-            [KeyboardButton(text="ℹ️ Помощь")],
+            [
+                InlineKeyboardButton(text="✨ Участие", callback_data="nav:shop"),
+                InlineKeyboardButton(text="🗓 Расписание", callback_data="nav:schedule"),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="⏳ Оплатить позже", callback_data="nav:pay_later"
+                ),
+                InlineKeyboardButton(text="🏷 Промокод", callback_data="nav:promo"),
+            ],
+            [InlineKeyboardButton(text="💬 Помощь", callback_data="nav:help")],
         ],
-        resize_keyboard=True,
-        one_time_keyboard=False,
+    )
+
+
+def back_home_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="← Главное меню", callback_data="nav:home")]
+        ]
     )

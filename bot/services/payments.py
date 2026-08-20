@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from aiogram import Bot, types
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bot.access_control.service import grant_access
+from bot.access_control.service import AccessChangeResult, grant_access
 from bot.db.models import Payment, PaymentStatus
 from bot.repositories import flows as flow_repo
 from bot.repositories import memberships as membership_repo
@@ -32,6 +32,9 @@ def _access_links_kb(
         )
     if not rows:
         return None
+    rows.append(
+        [types.InlineKeyboardButton(text="Открыть меню", callback_data="nav:home")]
+    )
     return types.InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -107,13 +110,9 @@ async def notify_payment_status(
 async def resolve_flow_for_payment(
     session: AsyncSession, paid_at: datetime
 ) -> int | None:
-    next_paid = await flow_repo.get_next_paid_flow(session, paid_at)
-    if next_paid is not None:
-        return next_paid.id
-    flow = await flow_repo.get_flow_in_sales_window(session, paid_at)
-    if flow is not None:
-        return flow.id
-    flow = await flow_repo.get_active_paid_flow(session, paid_at)
+    # A charge may only be attached to a paid flow whose sales window is open.
+    # Falling back to an arbitrary future flow can sell participation too early.
+    flow = await flow_repo.get_paid_flow_in_sales_window(session, paid_at)
     return flow.id if flow else None
 
 
@@ -135,20 +134,27 @@ async def resolve_early_full_payment_flow(
 
 
 async def confirm_payment(
-    session: AsyncSession, bot: Bot, payment: Payment, paid_at: datetime | None = None
-) -> None:
+    session: AsyncSession,
+    bot: Bot,
+    payment: Payment,
+    paid_at: datetime | None = None,
+    *,
+    notify_user: bool = True,
+) -> AccessChangeResult | None:
     if payment.status == PaymentStatus.PAID:
         user = await user_repo.get_user_by_id(session, payment.user_id)
         if user:
             links = await grant_access(bot, user.tg_id)
-            await _notify_success_with_links_fallback(
-                session,
-                bot,
-                payment.user_id,
-                links.get("channel_link"),
-                links.get("group_link"),
-            )
-        return
+            if notify_user:
+                await _notify_success_with_links_fallback(
+                    session,
+                    bot,
+                    payment.user_id,
+                    links.channel_link,
+                    links.group_link,
+                )
+            return links
+        return None
 
     paid_at = paid_at or datetime.now(timezone.utc)
     early_flow_id = await resolve_early_full_payment_flow(session, payment, paid_at)
@@ -164,14 +170,15 @@ async def confirm_payment(
             "Payment needs review: no flow matched",
             extra={"payment_id": payment.id, "external_id": payment.external_id},
         )
-        await notify_payment_status(
-            session,
-            bot,
-            payment.user_id,
-            "payment_needs_review",
-            dedupe_key=f"payment:{payment.id}:payment_needs_review",
-        )
-        return
+        if notify_user:
+            await notify_payment_status(
+                session,
+                bot,
+                payment.user_id,
+                "payment_needs_review",
+                dedupe_key=f"payment:{payment.id}:payment_needs_review",
+            )
+        return None
 
     payment.status = PaymentStatus.PAID
     payment.paid_at = paid_at
@@ -184,14 +191,15 @@ async def confirm_payment(
             "Payment needs review: flow not found",
             extra={"payment_id": payment.id, "flow_id": flow_id},
         )
-        await notify_payment_status(
-            session,
-            bot,
-            payment.user_id,
-            "payment_needs_review",
-            dedupe_key=f"payment:{payment.id}:payment_needs_review",
-        )
-        return
+        if notify_user:
+            await notify_payment_status(
+                session,
+                bot,
+                payment.user_id,
+                "payment_needs_review",
+                dedupe_key=f"payment:{payment.id}:payment_needs_review",
+            )
+        return None
     access_start_at = paid_at if early_flow_id else flow.start_at
     membership = await membership_service.upsert_membership_for_flow(
         session=session,
@@ -203,19 +211,22 @@ async def confirm_payment(
     )
 
     user = await user_repo.get_user_by_id(session, payment.user_id)
+    links = None
     if user:
         links = await grant_access(bot, user.tg_id)
-        await _notify_success_with_links_fallback(
-            session,
-            bot,
-            payment.user_id,
-            links.get("channel_link"),
-            links.get("group_link"),
-            dedupe_key=f"payment:{payment.id}:payment_success",
-        )
+        if notify_user:
+            await _notify_success_with_links_fallback(
+                session,
+                bot,
+                payment.user_id,
+                links.channel_link,
+                links.group_link,
+                dedupe_key=f"payment:{payment.id}:payment_success",
+            )
     if membership.pay_later_deadline_at:
         membership.pay_later_deadline_at = None
         membership.pay_later_used_at = None
+    return links
 
 
 async def manual_confirm_payment(
@@ -262,8 +273,8 @@ async def manual_confirm_payment(
             session,
             bot,
             payment.user_id,
-            links.get("channel_link"),
-            links.get("group_link"),
+            links.channel_link,
+            links.group_link,
             dedupe_key=f"payment:{payment.id}:payment_success",
         )
     if membership.pay_later_deadline_at:

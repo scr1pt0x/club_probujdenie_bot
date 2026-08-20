@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
@@ -51,19 +51,27 @@ def create_app(bot) -> FastAPI:
 
             if payment.status in {
                 PaymentStatus.PAID,
-                PaymentStatus.FAILED,
-                PaymentStatus.EXPIRED,
                 PaymentStatus.NEEDS_REVIEW,
             }:
                 return Response(status_code=200)
+            if event == "payment.canceled" and payment.status in {
+                PaymentStatus.FAILED,
+                PaymentStatus.EXPIRED,
+            }:
+                return Response(status_code=200)
 
-            if event == "payment.succeeded":
+            if event in {"payment.succeeded", "payment.canceled"}:
                 try:
                     remote = await adapter.get_payment(payment_id)
                 except Exception as exc:
                     logger.exception("Failed to verify payment", exc_info=exc)
-                    return Response(status_code=200)
-                if remote.get("status") != "succeeded":
+                    # Ask YooKassa to retry instead of acknowledging an event
+                    # that could not be verified.
+                    return Response(status_code=503)
+                expected_status = (
+                    "succeeded" if event == "payment.succeeded" else "canceled"
+                )
+                if remote.get("status") != expected_status:
                     return Response(status_code=200)
                 validation_error = validate_remote_payment(
                     remote,
@@ -84,6 +92,8 @@ def create_app(bot) -> FastAPI:
                         },
                     )
                     return Response(status_code=200)
+
+            if event == "payment.succeeded":
                 await confirm_payment(
                     session, bot, payment, paid_at=datetime.now(timezone.utc)
                 )
@@ -92,13 +102,17 @@ def create_app(bot) -> FastAPI:
 
             if event == "payment.canceled":
                 payment.status = PaymentStatus.FAILED
-                await notify_payment_status(
-                    session,
-                    bot,
-                    payment.user_id,
-                    "payment_failed",
-                    dedupe_key=f"payment:{payment.id}:payment_failed",
+                deadline = payment.expires_at or payment.created_at + timedelta(
+                    hours=24
                 )
+                if deadline >= datetime.now(timezone.utc) - timedelta(days=1):
+                    await notify_payment_status(
+                        session,
+                        bot,
+                        payment.user_id,
+                        "payment_failed",
+                        dedupe_key=f"payment:{payment.id}:payment_failed",
+                    )
                 await session.commit()
                 return Response(status_code=200)
 

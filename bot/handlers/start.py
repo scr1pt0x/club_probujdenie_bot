@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bot.repositories.users import get_or_create_user
 from bot.services.texts import get_text
 from bot.ui.keyboards import main_menu_kb
+from bot.ui.navigation import send_clean_screen
 from config import settings
 
 router = Router()
@@ -24,4 +25,4 @@ async def start_handler(message: types.Message, session: AsyncSession) -> None:
     await session.commit()
 
     text = await get_text(session, "start_welcome")
-    await message.answer(text, reply_markup=main_menu_kb())
+    await send_clean_screen(message, text, reply_markup=main_menu_kb())

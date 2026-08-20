@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.db.models import Membership, MembershipStatus
@@ -51,6 +51,16 @@ async def get_latest_membership(
         .limit(1)
     )
     return result.scalars().first()
+
+
+async def expire_all_active_memberships(session: AsyncSession, user_id: int) -> int:
+    result = await session.execute(
+        update(Membership)
+        .where(Membership.user_id == user_id)
+        .where(Membership.status == MembershipStatus.ACTIVE)
+        .values(status=MembershipStatus.EXPIRED)
+    )
+    return int(result.rowcount or 0)
 
 
 async def count_pay_later_used(session: AsyncSession) -> int:

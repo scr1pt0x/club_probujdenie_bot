@@ -2,6 +2,7 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
+from bot.access_control.service import AccessChangeResult
 from bot.db.models import MembershipStatus
 from bot.scheduler import jobs
 
@@ -37,6 +38,7 @@ def test_expiry_counts_only_users_who_would_actually_lose_access(monkeypatch):
 
     async def revoke(_bot, tg_id):
         revoked.append(tg_id)
+        return AccessChangeResult(channel_ok=True, group_ok=True)
 
     def mass_limit(_job_name, count):
         safety_counts.append(count)
@@ -56,6 +58,41 @@ def test_expiry_counts_only_users_who_would_actually_lose_access(monkeypatch):
     assert revoked == [1020]
     assert stale_protected.status == MembershipStatus.EXPIRED
     assert stale_revoke.status == MembershipStatus.EXPIRED
+    assert session.commits == 1
+
+
+def test_failed_telegram_revoke_is_retried_instead_of_hidden(monkeypatch):
+    stale = SimpleNamespace(id=1, user_id=20, status=MembershipStatus.ACTIVE)
+    session = FakeSession()
+
+    async def return_stale(*args, **kwargs):
+        return [stale]
+
+    async def no_future(*args, **kwargs):
+        return False
+
+    async def no_other(*args, **kwargs):
+        return False
+
+    async def get_user(*args, **kwargs):
+        return SimpleNamespace(id=20, tg_id=1020)
+
+    async def failed_revoke(*args, **kwargs):
+        return AccessChangeResult(channel_ok=True, group_ok=False)
+
+    monkeypatch.setattr(jobs, "_is_revoke_jobs_enabled", lambda: True)
+    monkeypatch.setattr(
+        jobs.membership_repo, "list_memberships_to_expire", return_stale
+    )
+    monkeypatch.setattr(jobs, "_has_any_future_paid_payment", no_future)
+    monkeypatch.setattr(jobs, "_has_other_active_membership", no_other)
+    monkeypatch.setattr(jobs, "_is_mass_revoke_blocked", lambda *args: False)
+    monkeypatch.setattr(jobs.user_repo, "get_user_by_id", get_user)
+    monkeypatch.setattr(jobs, "revoke_access", failed_revoke)
+
+    asyncio.run(jobs.expire_memberships(session, SimpleNamespace()))
+
+    assert stale.status == MembershipStatus.ACTIVE
     assert session.commits == 1
 
 

@@ -49,6 +49,7 @@ from bot.services.settings import (
 )
 from bot.services.texts import get_text
 from bot.ui.messages import split_message
+from bot.ui.navigation import edit_screen, send_clean_screen
 from config import settings
 
 router = Router()
@@ -135,7 +136,8 @@ async def admin_menu(message: types.Message, session: AsyncSession) -> None:
         payload={"tg_id": message.from_user.id},
     )
     await session.commit()
-    await message.answer(
+    await send_clean_screen(
+        message,
         "⚙️ Управление клубом\n\nВыберите раздел:",
         reply_markup=_admin_keyboard(),
     )
@@ -153,9 +155,11 @@ async def _show_template_card(
 ) -> None:
     text = await _get_template_text(session, key)
     chunks = split_message(f"Ключ: {key}\n\nТекст:\n{text}")
-    for chunk in chunks[:-1]:
+    await edit_screen(callback.message, chunks[0], reply_markup=template_card_kb(key))
+    for chunk in chunks[1:-1]:
         await callback.message.answer(chunk)
-    await callback.message.answer(chunks[-1], reply_markup=template_card_kb(key))
+    if len(chunks) > 1:
+        await callback.message.answer(chunks[-1], reply_markup=template_card_kb(key))
     await callback.answer()
 
 
@@ -229,7 +233,9 @@ async def _show_flows_screen(
             _format_flow_block("Следующий поток", next_flow, now),
         ]
     )
-    await callback.message.answer(text, reply_markup=flows_menu_kb(can_create_paid))
+    await edit_screen(
+        callback.message, text, reply_markup=flows_menu_kb(can_create_paid)
+    )
     await callback.answer()
 
 
@@ -250,7 +256,15 @@ async def _show_prices_screen_message(
 async def _show_prices_screen(
     callback: types.CallbackQuery, session: AsyncSession
 ) -> None:
-    await _show_prices_screen_message(callback.message, session)
+    effective = await get_effective_settings(session)
+    text = (
+        "Цены и правила:\n"
+        f"Вступительная: {effective.intro_price_rub}\n"
+        f"Продление: {effective.renewal_price_rub}\n"
+        f"Grace: {effective.grace_days} дней\n"
+        f"Оплачу позже: {effective.pay_later_max_days} дней"
+    )
+    await edit_screen(callback.message, text, reply_markup=prices_menu_kb())
     await callback.answer()
 
 
@@ -272,7 +286,7 @@ async def _show_mailings_screen(
         f"- Активная отсрочка: {pay_later_active}\n"
         f"- Просрочено (до отключения): {pay_later_overdue}"
     )
-    await callback.message.answer(text, reply_markup=mailings_menu_kb(enabled))
+    await edit_screen(callback.message, text, reply_markup=mailings_menu_kb(enabled))
     await callback.answer()
 
 
@@ -302,7 +316,8 @@ def _mailings_custom_audience_kb() -> InlineKeyboardMarkup:
 
 async def _show_users_search(callback: types.CallbackQuery, state: FSMContext) -> None:
     await state.set_state(UserSearchState.waiting_query)
-    await callback.message.answer(
+    await edit_screen(
+        callback.message,
         "👤 Управление пользователями\n\n"
         "Введите @username или tg_id участницы.\n\n"
         "После поиска вы сможете:\n"
@@ -318,14 +333,22 @@ async def _show_users_search(callback: types.CallbackQuery, state: FSMContext) -
 async def _show_promos_screen(
     callback: types.CallbackQuery, session: AsyncSession
 ) -> None:
-    await callback.message.answer("Промокоды:", reply_markup=promos_menu_kb())
+    await edit_screen(callback.message, "Промокоды:", reply_markup=promos_menu_kb())
     await callback.answer()
 
 
 async def _show_shop_screen(
     callback: types.CallbackQuery, session: AsyncSession
 ) -> None:
-    await _show_shop_screen_message(callback.message, session)
+    prices = await get_shop_prices(session)
+    free_label = await get_shop_free_label(session)
+    text = (
+        "Витрина:\n"
+        f"Вступление: {prices['intro']} ₽\n"
+        f"Продление: {prices['renewal']} ₽\n"
+        f"Бесплатный: {free_label}"
+    )
+    await edit_screen(callback.message, text, reply_markup=shop_menu_kb())
     await callback.answer()
 
 
@@ -441,8 +464,8 @@ async def admin_section(
         await _show_prices_screen(callback, session)
         return
     elif section == "texts":
-        await callback.message.answer(
-            "Выберите шаблон:", reply_markup=templates_list_kb()
+        await edit_screen(
+            callback.message, "Выберите шаблон:", reply_markup=templates_list_kb()
         )
         await callback.answer()
         return
@@ -461,22 +484,29 @@ async def admin_section(
     elif section == "audit":
         logs = await list_audit_logs(session, limit=50)
         if not logs:
-            await callback.message.answer(
-                "Лог пуст.", reply_markup=back_menu_kb("admin:menu")
+            await edit_screen(
+                callback.message, "Лог пуст.", reply_markup=back_menu_kb("admin:menu")
             )
             await callback.answer()
             return
         blocks = [_format_audit_log(entry) for entry in logs]
         chunks = split_message("\n".join(blocks))
-        for chunk in chunks[:-1]:
-            await callback.message.answer(chunk)
-        await callback.message.answer(
-            chunks[-1], reply_markup=back_menu_kb("admin:menu")
+        await edit_screen(
+            callback.message,
+            chunks[0],
+            reply_markup=back_menu_kb("admin:menu") if len(chunks) == 1 else None,
         )
+        for chunk in chunks[1:-1]:
+            await callback.message.answer(chunk)
+        if len(chunks) > 1:
+            await callback.message.answer(
+                chunks[-1], reply_markup=back_menu_kb("admin:menu")
+            )
         await callback.answer()
         return
     elif section == "menu":
-        await callback.message.answer(
+        await edit_screen(
+            callback.message,
             "⚙️ Управление клубом\n\nВыберите раздел:",
             reply_markup=_admin_keyboard(),
         )
@@ -491,7 +521,8 @@ async def admin_section(
                 return
             await state.set_state(PriceEditState.waiting_value)
             await state.update_data(setting_key=key)
-            await callback.message.answer(
+            await edit_screen(
+                callback.message,
                 "Введите новое значение числом.",
                 reply_markup=back_menu_kb("admin:prices"),
             )
@@ -510,8 +541,10 @@ async def admin_section(
             await _show_mailings_screen(callback, session)
             return
         if len(parts) == 2 and parts[1] == "custom":
-            await callback.message.answer(
-                "Выберите аудиторию:", reply_markup=_mailings_custom_audience_kb()
+            await edit_screen(
+                callback.message,
+                "Выберите аудиторию:",
+                reply_markup=_mailings_custom_audience_kb(),
             )
             await callback.answer()
             return
@@ -522,7 +555,8 @@ async def admin_section(
                 return
             await state.set_state(CustomMailingState.waiting_text)
             await state.update_data(audience=audience)
-            await callback.message.answer(
+            await edit_screen(
+                callback.message,
                 "Введите текст рассылки одним сообщением.",
                 reply_markup=back_menu_kb("admin:mailings"),
             )
@@ -531,8 +565,8 @@ async def admin_section(
     elif section.startswith("shop:"):
         parts = section.split(":")
         if len(parts) == 2 and parts[1] == "texts":
-            await callback.message.answer(
-                "Тексты витрины:", reply_markup=shop_texts_kb()
+            await edit_screen(
+                callback.message, "Тексты витрины:", reply_markup=shop_texts_kb()
             )
             await callback.answer()
             return
@@ -667,7 +701,7 @@ async def admin_section(
             membership.grace_end_at = compute_grace_end(
                 flow.end_at, effective.grace_days
             )
-            await grant_access(callback.message.bot, user.tg_id)
+            access_result = await grant_access(callback.message.bot, user.tg_id)
             await add_audit_log(
                 session,
                 action="admin_user_action",
@@ -680,26 +714,81 @@ async def admin_section(
                 actor_user_id=admin_user.id,
             )
             await session.commit()
-            await callback.message.answer("✅ Доступ выдан.")
+            if access_result.successful:
+                access_keyboard = InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [
+                            InlineKeyboardButton(
+                                text="📢 Войти в канал",
+                                url=access_result.channel_link,
+                            )
+                        ],
+                        [
+                            InlineKeyboardButton(
+                                text="💬 Войти в группу",
+                                url=access_result.group_link,
+                            )
+                        ],
+                    ]
+                )
+                try:
+                    await callback.message.bot.send_message(
+                        user.tg_id,
+                        "✅ Администратор активировал ваш доступ. "
+                        "Отправьте заявки по кнопкам ниже.",
+                        reply_markup=access_keyboard,
+                    )
+                except Exception:
+                    await callback.message.answer(
+                        "⚠️ Доступ выдан, но пользователь не получил сообщение. "
+                        "Вероятно, он ещё не запускал бота."
+                    )
+                await callback.message.answer("✅ Доступ выдан в канал и группу.")
+            else:
+                await callback.message.answer(
+                    "⚠️ Участие сохранено, но Telegram выдал доступ не везде. "
+                    "Проверьте права бота и повторите действие."
+                )
             await callback.answer()
             return
 
         if action == "revoke":
-            await revoke_access(callback.message.bot, user.tg_id)
-            if membership:
-                membership.status = MembershipStatus.EXPIRED
+            access_result = await revoke_access(callback.message.bot, user.tg_id)
+            if access_result.protected:
+                await session.rollback()
+                await callback.message.answer(
+                    "🛡 Этот пользователь указан как администратор бота. "
+                    "Автоматическое исключение запрещено."
+                )
+                await callback.answer()
+                return
+            if not access_result.successful:
+                await session.rollback()
+                await callback.message.answer(
+                    "⚠️ Исключение выполнено не во всех чатах. Записи участия "
+                    "не изменены — устраните проблему с правами и повторите."
+                )
+                await callback.answer()
+                return
+            expired_count = await membership_repo.expire_all_active_memberships(
+                session, user.id
+            )
             await add_audit_log(
                 session,
                 action="admin_user_action",
                 payload={
                     "tg_id": user.tg_id,
                     "action": "revoke_access",
+                    "expired_memberships": expired_count,
                     "actor_tg_id": callback.from_user.id,
                 },
                 actor_user_id=admin_user.id,
             )
             await session.commit()
-            await callback.message.answer("⛔ Доступ забран.")
+            await callback.message.answer(
+                f"⛔ Доступ забран из канала и группы. "
+                f"Закрыто активных участий: {expired_count}."
+            )
             await callback.answer()
             return
 
