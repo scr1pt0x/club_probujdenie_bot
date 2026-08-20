@@ -9,6 +9,7 @@ from bot.db.models import MembershipStatus
 from bot.handlers.menu import _shop_menu_kb
 from bot.payments.verification import validate_remote_payment
 from bot.services import memberships as membership_service
+from bot.services import payments as payment_service
 from bot.ui.formatters import format_flow_period, format_local_date, format_price_rub
 from bot.ui.keyboards import main_menu_kb
 from bot.ui.messages import split_message
@@ -94,6 +95,55 @@ def test_revoke_access_never_removes_configured_administrator(monkeypatch):
     result = run(access_service.revoke_access(FailIfCalledBot(), 42))
     assert result.successful
     assert result.protected
+
+
+def test_revoke_stops_before_group_when_channel_operation_fails(monkeypatch):
+    calls = []
+
+    async def fail_first(_bot, chat_id, tg_id):
+        calls.append((chat_id, tg_id))
+        return False
+
+    monkeypatch.setattr(
+        access_service,
+        "settings",
+        SimpleNamespace(
+            primary_channel_id=-1001,
+            secondary_discussion_id=-1002,
+            admin_tg_ids=[],
+        ),
+    )
+    monkeypatch.setattr(access_service, "_safe_ban", fail_first)
+
+    result = run(access_service.revoke_access(SimpleNamespace(), 42))
+
+    assert calls == [(-1001, 42)]
+    assert not result.successful
+
+
+def test_confirmed_payment_locks_user_before_granting_access(monkeypatch):
+    calls = []
+
+    async def lock_user(_session, user_id):
+        calls.append(("lock", user_id))
+        return SimpleNamespace(id=user_id, tg_id=42)
+
+    async def grant(_bot, tg_id):
+        calls.append(("grant", tg_id))
+        return access_service.AccessChangeResult(channel_ok=True, group_ok=True)
+
+    monkeypatch.setattr(payment_service.user_repo, "lock_user_by_id", lock_user)
+    monkeypatch.setattr(payment_service, "grant_access", grant)
+    payment = SimpleNamespace(status="paid", user_id=7)
+
+    result = run(
+        payment_service.confirm_payment(
+            SimpleNamespace(), SimpleNamespace(), payment, notify_user=False
+        )
+    )
+
+    assert result.successful
+    assert calls == [("lock", 7), ("grant", 42)]
 
 
 def test_remote_payment_must_match_identity_amount_and_currency():

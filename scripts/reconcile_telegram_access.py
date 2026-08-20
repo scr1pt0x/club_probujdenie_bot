@@ -21,6 +21,9 @@ from bot.db.models import (
     User,
 )
 from bot.db.session import AsyncSessionLocal
+from bot.repositories.audit_log import add_audit_log
+from bot.repositories.users import lock_user_by_tg_id
+from bot.services.entitlements import has_valid_access
 from config import settings
 
 PRESENT_STATUSES = {"member", "restricted"}
@@ -42,6 +45,7 @@ async def _inactive_tg_ids() -> list[int]:
         select(Membership.id).where(
             Membership.user_id == User.id,
             Membership.status == MembershipStatus.ACTIVE,
+            Membership.grace_end_at >= now,
         )
     ).correlate(User)
     future_payment = exists(
@@ -105,13 +109,30 @@ async def main() -> None:
 
         removed = 0
         failed = 0
+        preserved = 0
         for tg_id in candidates:
-            result = await revoke_access(bot, tg_id)
-            if result.successful:
-                removed += 1
-            else:
-                failed += 1
-        print(f"removed={removed} failed={failed}")
+            async with AsyncSessionLocal() as session:
+                user = await lock_user_by_tg_id(session, tg_id)
+                if user is None or await has_valid_access(
+                    session, user.id, datetime.now(timezone.utc)
+                ):
+                    preserved += 1
+                    await session.commit()
+                    continue
+
+                result = await revoke_access(bot, tg_id)
+                if result.successful:
+                    removed += 1
+                    if not result.protected:
+                        await add_audit_log(
+                            session,
+                            action="reconciliation_access_revoke",
+                            payload={"user_id": user.id, "tg_id": tg_id},
+                        )
+                else:
+                    failed += 1
+                await session.commit()
+        print(f"removed={removed} failed={failed} preserved={preserved}")
     finally:
         await bot.session.close()
 

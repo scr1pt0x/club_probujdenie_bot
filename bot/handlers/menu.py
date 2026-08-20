@@ -23,7 +23,7 @@ from bot.payments.yookassa_adapter import YooKassaAdapter
 from bot.repositories import flows as flow_repo
 from bot.repositories import memberships as membership_repo
 from bot.repositories import promos as promo_repo
-from bot.repositories.users import get_or_create_user
+from bot.repositories.users import get_or_create_user, lock_user_by_id
 from bot.services.flows import get_next_paid_flow
 from bot.services.memberships import compute_grace_end, evaluate_pay_later
 from bot.services.payments import (
@@ -734,6 +734,14 @@ async def payment_refresh_handler(
         is_admin=callback.from_user.id in settings.admin_tg_ids,
     )
     await session.commit()
+    user = await lock_user_by_id(session, user.id)
+    if user is None:
+        await responder.answer(
+            "Профиль не найден. Вернитесь в главное меню и повторите попытку.",
+            reply_markup=back_home_kb(),
+        )
+        await callback.answer()
+        return
 
     pending_payment = (
         await session.execute(
@@ -875,6 +883,7 @@ async def payment_refresh_handler(
                 ],
             ]
         )
+        await session.commit()
         await responder.answer(
             "⏳ Оплата пока не подтверждена банком.\n"
             "Если вы уже оплатили, повторите проверку через 30–60 секунд.",
@@ -883,6 +892,7 @@ async def payment_refresh_handler(
         await callback.answer()
         return
 
+    await session.commit()
     await responder.answer(
         "Платёжный сервис вернул неизвестный статус. Не создавайте повторный "
         "платёж и попробуйте проверку позже.",

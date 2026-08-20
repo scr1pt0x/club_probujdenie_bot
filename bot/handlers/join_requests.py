@@ -5,8 +5,8 @@ from aiogram import Router, types
 from aiogram.exceptions import TelegramAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bot.repositories.memberships import get_active_membership
 from bot.repositories.users import get_user_by_tg_id
+from bot.services.entitlements import has_valid_access
 from config import settings
 
 router = Router()
@@ -34,9 +34,8 @@ async def approve_join_request(
             logger.exception("Failed to decline join request (no user)")
         return
 
-    membership = await get_active_membership(session, user.id)
     now = datetime.now(timezone.utc)
-    if membership is None or membership.access_end_at < now:
+    if not await has_valid_access(session, user.id, now):
         try:
             await join_request.bot.decline_chat_join_request(
                 chat_id=join_request.chat.id, user_id=join_request.from_user.id

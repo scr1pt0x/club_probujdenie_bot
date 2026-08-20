@@ -37,6 +37,7 @@ from bot.repositories.users import (
     get_user_by_id,
     get_user_by_tg_id,
     get_user_by_username,
+    lock_user_by_id,
 )
 from bot.services.flows import sales_window_for_start
 from bot.services.mailings import send_custom_broadcast
@@ -384,7 +385,9 @@ async def _send_shop_preview(message: types.Message, session: AsyncSession) -> N
 def _audit_action_label(action: str) -> str:
     mapping = {
         "admin_user_action": "Действие администратора",
+        "automatic_access_revoke": "Автоматическое исключение",
         "mailing_sent": "Рассылка отправлена",
+        "reconciliation_access_revoke": "Исключение при сверке",
     }
     return mapping.get(action, action)
 
@@ -674,6 +677,14 @@ async def admin_section(
             is_admin=True,
         )
         await session.commit()
+
+        # Serialize explicit admin changes with payment confirmation and
+        # automatic expiry for this participant.
+        user = await lock_user_by_id(session, user.id)
+        if user is None:
+            await callback.message.answer("Пользователь больше не существует.")
+            await callback.answer()
+            return
 
         now = datetime.now(timezone.utc)
         membership = await membership_repo.get_latest_membership(

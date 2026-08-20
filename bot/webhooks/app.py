@@ -10,6 +10,7 @@ from bot.db.session import AsyncSessionLocal
 from bot.payments.verification import validate_remote_payment
 from bot.payments.yookassa_adapter import YooKassaAdapter
 from bot.repositories.payments import get_payment_by_external_id
+from bot.repositories.users import lock_user_by_id
 from bot.services.payments import confirm_payment, notify_payment_status
 
 logger = logging.getLogger(__name__)
@@ -45,6 +46,13 @@ def create_app(bot) -> FastAPI:
             return Response(status_code=200)
 
         async with AsyncSessionLocal() as session:
+            payment = await get_payment_by_external_id(session, payment_id)
+            if not payment:
+                return Response(status_code=200)
+            if await lock_user_by_id(session, payment.user_id) is None:
+                return Response(status_code=200)
+            # The user lock serializes this webhook with checkout, manual
+            # refresh, automatic expiry and admin access changes.
             payment = await get_payment_by_external_id(session, payment_id)
             if not payment:
                 return Response(status_code=200)

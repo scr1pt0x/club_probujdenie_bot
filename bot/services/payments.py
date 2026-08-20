@@ -122,8 +122,10 @@ async def confirm_payment(
     *,
     notify_user: bool = True,
 ) -> AccessChangeResult | None:
+    # Automatic expiry jobs use the same row lock before revoking Telegram
+    # access. Whichever decision starts second must see the first one's commit.
+    user = await user_repo.lock_user_by_id(session, payment.user_id)
     if payment.status == PaymentStatus.PAID:
-        user = await user_repo.get_user_by_id(session, payment.user_id)
         if user:
             links = await grant_access(bot, user.tg_id)
             if notify_user:
@@ -191,7 +193,6 @@ async def confirm_payment(
         payment=payment,
     )
 
-    user = await user_repo.get_user_by_id(session, payment.user_id)
     links = None
     if user:
         links = await grant_access(bot, user.tg_id)

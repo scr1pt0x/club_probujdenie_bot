@@ -92,5 +92,10 @@ async def revoke_access(bot: Bot, tg_id: int) -> AccessChangeResult:
         logger.warning("Protected administrator revoke skipped", extra={"tg_id": tg_id})
         return AccessChangeResult(channel_ok=True, group_ok=True, protected=True)
     channel_ok = await _safe_ban(bot, settings.primary_channel_id, tg_id)
+    if not channel_ok:
+        # Do not remove somebody from the discussion group after the first
+        # Telegram operation failed. The caller keeps DB access active and may
+        # retry later, avoiding a needless group-only exclusion.
+        return AccessChangeResult(channel_ok=False, group_ok=False)
     group_ok = await _safe_ban(bot, settings.secondary_discussion_id, tg_id)
     return AccessChangeResult(channel_ok=channel_ok, group_ok=group_ok)

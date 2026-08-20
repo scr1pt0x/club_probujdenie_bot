@@ -1,5 +1,4 @@
 import asyncio
-from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from bot.handlers import join_requests
@@ -47,10 +46,8 @@ def test_active_user_join_request_is_approved(monkeypatch):
     async def get_user(*args, **kwargs):
         return SimpleNamespace(id=7)
 
-    async def get_membership(*args, **kwargs):
-        return SimpleNamespace(
-            access_end_at=datetime.now(timezone.utc) + timedelta(days=1)
-        )
+    async def has_access(*args, **kwargs):
+        return True
 
     bot = FakeBot()
     monkeypatch.setattr(
@@ -59,12 +56,34 @@ def test_active_user_join_request_is_approved(monkeypatch):
         SimpleNamespace(primary_channel_id=-1001, secondary_discussion_id=-1002),
     )
     monkeypatch.setattr(join_requests, "get_user_by_tg_id", get_user)
-    monkeypatch.setattr(join_requests, "get_active_membership", get_membership)
+    monkeypatch.setattr(join_requests, "has_valid_access", has_access)
 
     asyncio.run(join_requests.approve_join_request(_request(bot), SimpleNamespace()))
 
     assert bot.approved == [{"chat_id": -1001, "user_id": 42}]
     assert not bot.declined
+
+
+def test_known_user_without_valid_access_is_declined(monkeypatch):
+    async def get_user(*args, **kwargs):
+        return SimpleNamespace(id=7)
+
+    async def no_access(*args, **kwargs):
+        return False
+
+    bot = FakeBot()
+    monkeypatch.setattr(
+        join_requests,
+        "settings",
+        SimpleNamespace(primary_channel_id=-1001, secondary_discussion_id=-1002),
+    )
+    monkeypatch.setattr(join_requests, "get_user_by_tg_id", get_user)
+    monkeypatch.setattr(join_requests, "has_valid_access", no_access)
+
+    asyncio.run(join_requests.approve_join_request(_request(bot), SimpleNamespace()))
+
+    assert bot.declined == [{"chat_id": -1001, "user_id": 42}]
+    assert not bot.approved
 
 
 def test_unmanaged_chat_request_is_ignored(monkeypatch):

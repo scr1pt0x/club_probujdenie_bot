@@ -6,7 +6,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.repositories import memberships as membership_repo
-from bot.repositories.users import get_or_create_user
+from bot.repositories.users import get_or_create_user, lock_user_by_id
 from bot.services.memberships import apply_pay_later, evaluate_pay_later
 from bot.ui.formatters import format_local_date
 from bot.ui.keyboards import back_home_kb
@@ -108,6 +108,10 @@ async def pay_later_handler(
         is_admin=callback.from_user.id in settings.admin_tg_ids,
     )
     await session.commit()
+    user = await lock_user_by_id(session, user.id)
+    if user is None:
+        await callback.answer("Пользователь не найден", show_alert=True)
+        return
     membership = await membership_repo.get_active_membership(session, user_id=user.id)
     if not membership:
         await callback.answer("Нет активной подписки", show_alert=True)

@@ -36,8 +36,23 @@ async def get_user_by_id(session: AsyncSession, user_id: int) -> User | None:
     return result.scalar_one_or_none()
 
 
+async def lock_user_by_id(session: AsyncSession, user_id: int) -> User | None:
+    """Serialize payment, grant and revoke decisions for one Telegram user."""
+    result = await session.execute(
+        select(User).where(User.id == user_id).with_for_update()
+    )
+    return result.scalar_one_or_none()
+
+
 async def get_user_by_tg_id(session: AsyncSession, tg_id: int) -> User | None:
     result = await session.execute(select(User).where(User.tg_id == tg_id))
+    return result.scalar_one_or_none()
+
+
+async def lock_user_by_tg_id(session: AsyncSession, tg_id: int) -> User | None:
+    result = await session.execute(
+        select(User).where(User.tg_id == tg_id).with_for_update()
+    )
     return result.scalar_one_or_none()
 
 

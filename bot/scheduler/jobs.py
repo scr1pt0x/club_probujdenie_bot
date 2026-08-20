@@ -1,4 +1,5 @@
 import logging
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -7,13 +8,15 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.access_control.service import revoke_access
-from bot.db.models import Flow, Membership, MembershipStatus, Payment, PaymentStatus
+from bot.db.models import Membership, MembershipStatus, Payment, PaymentStatus
 from bot.payments.adapter import PaymentAdapter
 from bot.payments.verification import validate_remote_payment
 from bot.repositories import flows as flow_repo
 from bot.repositories import memberships as membership_repo
 from bot.repositories import payments as payment_repo
 from bot.repositories import users as user_repo
+from bot.repositories.audit_log import add_audit_log
+from bot.services.entitlements import has_valid_access
 from bot.services.mailings import (
     send_auto_end_mailings,
     send_flow_mailings,
@@ -57,48 +60,33 @@ def _is_mass_revoke_blocked(job_name: str, candidates_count: int) -> bool:
     return True
 
 
-async def _has_other_active_membership(
+def _group_memberships_by_user(
+    memberships: list[Membership],
+) -> dict[int, list[Membership]]:
+    grouped: dict[int, list[Membership]] = defaultdict(list)
+    for membership in memberships:
+        grouped[membership.user_id].append(membership)
+    return dict(grouped)
+
+
+async def _record_automatic_revoke(
     session: AsyncSession,
+    *,
+    job: str,
     user_id: int,
-    exclude_membership_id: int,
-    now: datetime,
-) -> bool:
-    result = await session.execute(
-        select(Membership.id)
-        .where(Membership.user_id == user_id)
-        .where(Membership.status == MembershipStatus.ACTIVE)
-        .where(Membership.id != exclude_membership_id)
-        .where(Membership.grace_end_at >= now)
-        .limit(1)
+    tg_id: int,
+    memberships: list[Membership],
+) -> None:
+    await add_audit_log(
+        session,
+        action="automatic_access_revoke",
+        payload={
+            "job": job,
+            "user_id": user_id,
+            "tg_id": tg_id,
+            "membership_ids": [membership.id for membership in memberships],
+        },
     )
-    return result.scalar_one_or_none() is not None
-
-
-async def _has_paid_payment_for_flow(
-    session: AsyncSession, user_id: int, flow_id: int
-) -> bool:
-    result = await session.execute(
-        select(Payment.id)
-        .where(Payment.user_id == user_id)
-        .where(Payment.flow_id == flow_id)
-        .where(Payment.status == PaymentStatus.PAID)
-        .limit(1)
-    )
-    return result.scalar_one_or_none() is not None
-
-
-async def _has_any_future_paid_payment(
-    session: AsyncSession, user_id: int, now: datetime
-) -> bool:
-    result = await session.execute(
-        select(Payment.id)
-        .join(Flow, Payment.flow_id == Flow.id)
-        .where(Payment.user_id == user_id)
-        .where(Payment.status == PaymentStatus.PAID)
-        .where(Flow.end_at > now)
-        .limit(1)
-    )
-    return result.scalar_one_or_none() is not None
 
 
 async def expire_memberships(session: AsyncSession, bot: Bot) -> None:
@@ -107,35 +95,49 @@ async def expire_memberships(session: AsyncSession, bot: Bot) -> None:
         return
     now = datetime.now(timezone.utc)
     memberships = await membership_repo.list_memberships_to_expire(session, now)
-
-    revoke_user_ids: set[int] = set()
-    for membership in memberships:
-        if await _has_any_future_paid_payment(session, membership.user_id, now):
-            continue
-        if await _has_other_active_membership(
-            session, membership.user_id, membership.id, now
-        ):
-            continue
-        revoke_user_ids.add(membership.user_id)
+    grouped = _group_memberships_by_user(memberships)
+    revoke_user_ids = {
+        user_id
+        for user_id, stale in grouped.items()
+        if not await has_valid_access(
+            session,
+            user_id,
+            now,
+            exclude_membership_ids={membership.id for membership in stale},
+        )
+    }
 
     if _is_mass_revoke_blocked("expire_memberships", len(revoke_user_ids)):
         return
 
-    revoke_succeeded: dict[int, bool] = {}
-    for user_id in revoke_user_ids:
-        user = await user_repo.get_user_by_id(session, user_id)
-        if user is None:
-            revoke_succeeded[user_id] = True
+    for user_id, stale in grouped.items():
+        user = await user_repo.lock_user_by_id(session, user_id)
+        excluded_ids = {membership.id for membership in stale}
+        # Recheck only after taking the same lock used by payment confirmation.
+        # A payment committed while the job was building its candidate list must
+        # protect the participant from a stale Telegram ban.
+        keep_access = await has_valid_access(
+            session, user_id, now, exclude_membership_ids=excluded_ids
+        )
+        if keep_access or user is None:
+            for membership in stale:
+                membership.status = MembershipStatus.EXPIRED
+            await session.commit()
             continue
-        result = await revoke_access(bot, user.tg_id)
-        revoke_succeeded[user_id] = result.successful
 
-    for membership in memberships:
-        if membership.user_id not in revoke_user_ids or revoke_succeeded.get(
-            membership.user_id, False
-        ):
-            membership.status = MembershipStatus.EXPIRED
-    await session.commit()
+        result = await revoke_access(bot, user.tg_id)
+        if result.successful:
+            for membership in stale:
+                membership.status = MembershipStatus.EXPIRED
+            if not result.protected:
+                await _record_automatic_revoke(
+                    session,
+                    job="expire_memberships",
+                    user_id=user_id,
+                    tg_id=user.tg_id,
+                    memberships=stale,
+                )
+        await session.commit()
 
 
 async def enforce_pay_later_deadlines(session: AsyncSession, bot: Bot) -> None:
@@ -144,7 +146,6 @@ async def enforce_pay_later_deadlines(session: AsyncSession, bot: Bot) -> None:
         return
     now = datetime.now(timezone.utc)
     revoke_text = await get_text(session, "pay_later_access_revoked")
-    revoked_user_ids: set[int] = set()
     result = await session.execute(
         select(Membership)
         .where(Membership.status == MembershipStatus.ACTIVE)
@@ -152,113 +153,58 @@ async def enforce_pay_later_deadlines(session: AsyncSession, bot: Bot) -> None:
         .where(Membership.pay_later_deadline_at <= now)
     )
     memberships = list(result.scalars().all())
-    revoke_candidate_ids: set[int] = set()
-    for membership in memberships:
-        if not await _has_other_active_membership(
-            session, membership.user_id, membership.id, now
-        ):
-            revoke_candidate_ids.add(membership.user_id)
+    grouped = _group_memberships_by_user(memberships)
+    revoke_candidate_ids = {
+        user_id
+        for user_id, overdue in grouped.items()
+        if not await has_valid_access(
+            session,
+            user_id,
+            now,
+            exclude_membership_ids={membership.id for membership in overdue},
+        )
+    }
     if _is_mass_revoke_blocked(
         "enforce_pay_later_deadlines", len(revoke_candidate_ids)
     ):
         return
-    for membership in memberships:
-        user = await user_repo.get_user_by_id(session, membership.user_id)
-        if (
-            user
-            and user.id not in revoked_user_ids
-            and membership.user_id in revoke_candidate_ids
-        ):
-            result = await revoke_access(bot, user.tg_id)
-            if not result.successful:
-                # Keep it active so the next scheduler run retries both chats.
-                continue
-            revoked_user_ids.add(user.id)
+    for user_id, overdue in grouped.items():
+        user = await user_repo.lock_user_by_id(session, user_id)
+        excluded_ids = {membership.id for membership in overdue}
+        keep_access = await has_valid_access(
+            session, user_id, now, exclude_membership_ids=excluded_ids
+        )
+        if keep_access or user is None:
+            for membership in overdue:
+                membership.status = MembershipStatus.EXPIRED
+            await session.commit()
+            continue
+
+        result = await revoke_access(bot, user.tg_id)
+        if not result.successful:
+            # Keep all rows active so the next run retries instead of hiding a
+            # partial Telegram failure.
+            await session.commit()
+            continue
+
+        for membership in overdue:
+            membership.status = MembershipStatus.EXPIRED
+        if not result.protected:
+            await _record_automatic_revoke(
+                session,
+                job="enforce_pay_later_deadlines",
+                user_id=user_id,
+                tg_id=user.tg_id,
+                memberships=overdue,
+            )
             try:
                 await bot.send_message(user.tg_id, revoke_text)
             except Exception:
                 logger.exception(
                     "Failed to notify user on pay-later expiry",
-                    extra={
-                        "user_id": membership.user_id,
-                        "membership_id": membership.id,
-                    },
+                    extra={"user_id": user_id},
                 )
-        membership.status = MembershipStatus.EXPIRED
-    await session.commit()
-
-
-async def remove_non_renewed_on_flow_start(
-    session: AsyncSession, bot: Bot, flow_id: int
-) -> None:
-    if not _is_revoke_jobs_enabled():
-        logger.warning("Revoke jobs disabled: remove_non_renewed_on_flow_start skipped")
-        return
-    now_utc = datetime.now(timezone.utc)
-    tz = ZoneInfo(settings.scheduler_timezone)
-    now = now_utc.astimezone(tz).date()
-    flow = await flow_repo.get_flow_by_id(session, flow_id)
-    if flow is None or flow.start_at.astimezone(tz).date() != now:
-        return
-
-    revoked_user_ids: set[int] = set()
-    result = await session.execute(
-        select(Membership)
-        .where(Membership.status == MembershipStatus.ACTIVE)
-        .where(Membership.access_end_at < flow.start_at)
-        .where(Membership.pay_later_used_at.is_(None))
-    )
-    memberships = list(result.scalars().all())
-    eligible_memberships: list[Membership] = []
-    revoke_candidate_ids: set[int] = set()
-    for membership in memberships:
-        target_membership = await membership_repo.get_membership_by_flow(
-            session, user_id=membership.user_id, flow_id=flow.id
-        )
-        if (
-            target_membership is not None
-            and target_membership.status == MembershipStatus.ACTIVE
-        ):
-            continue
-        if await _has_paid_payment_for_flow(session, membership.user_id, flow.id):
-            # Safety net: paid users must never be removed even if membership row
-            # for target flow has not been created yet.
-            continue
-
-        eligible_memberships.append(membership)
-        if not await _has_other_active_membership(
-            session, membership.user_id, membership.id, now_utc
-        ):
-            revoke_candidate_ids.add(membership.user_id)
-
-    if _is_mass_revoke_blocked(
-        "remove_non_renewed_on_flow_start", len(revoke_candidate_ids)
-    ):
-        return
-
-    for membership in eligible_memberships:
-        # Без отсрочки и оплаты удаляем в первый день нового потока.
-        user = await user_repo.get_user_by_id(session, membership.user_id)
-        if (
-            user
-            and user.id not in revoked_user_ids
-            and membership.user_id in revoke_candidate_ids
-        ):
-            result = await revoke_access(bot, user.tg_id)
-            if not result.successful:
-                # Keep it active so the next scheduler run retries.
-                continue
-            revoked_user_ids.add(user.id)
-        membership.status = MembershipStatus.EXPIRED
-    await session.commit()
-
-
-async def remove_non_renewed_on_paid_flows(session: AsyncSession, bot: Bot) -> None:
-    flows = await flow_repo.list_flows(session)
-    for flow in flows:
-        if flow.is_free:
-            continue
-        await remove_non_renewed_on_flow_start(session, bot, flow.id)
+        await session.commit()
 
 
 async def check_pending_payments(
@@ -272,6 +218,16 @@ async def check_pending_payments(
                 session, listed_payment.external_id
             )
             if payment is None or payment.status != PaymentStatus.PENDING:
+                await session.commit()
+                continue
+            if await user_repo.lock_user_by_id(session, payment.user_id) is None:
+                await session.commit()
+                continue
+            payment = await payment_repo.get_payment_by_external_id(
+                session, listed_payment.external_id
+            )
+            if payment is None or payment.status != PaymentStatus.PENDING:
+                await session.commit()
                 continue
             remote = await adapter.get_payment(payment.external_id)
             validation_error = validate_remote_payment(
@@ -330,6 +286,9 @@ async def check_pending_payments(
                         dedupe_key=f"payment:{payment.id}:payment_expired",
                     )
             else:
+                # Release the per-user row lock even when YooKassa is still
+                # pending and no database values changed.
+                await session.commit()
                 continue
 
             # Commit each processed payment independently so one failure

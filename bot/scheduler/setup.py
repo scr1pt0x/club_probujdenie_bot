@@ -28,9 +28,6 @@ def setup_scheduler(bot, payment_adapter=None) -> AsyncIOScheduler:
     async def _auto_mailings_job():
         await jobs.auto_mailings(bot, AsyncSessionLocal)
 
-    async def _remove_non_renewed_job():
-        await _with_session(lambda s: jobs.remove_non_renewed_on_paid_flows(s, bot))
-
     async def _check_payments_job():
         await _with_session(
             lambda s: jobs.check_pending_payments(s, bot, payment_adapter)
@@ -68,15 +65,6 @@ def setup_scheduler(bot, payment_adapter=None) -> AsyncIOScheduler:
         id="auto_mailings",
         replace_existing=True,
     )
-    if settings.revoke_jobs_enabled:
-        scheduler.add_job(
-            _remove_non_renewed_job,
-            "interval",
-            hours=12,
-            id="remove_non_renewed",
-            replace_existing=True,
-        )
-
     if payment_adapter is not None:
         scheduler.add_job(
             _check_payments_job,
