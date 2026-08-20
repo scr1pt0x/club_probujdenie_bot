@@ -4,7 +4,14 @@ from datetime import datetime
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bot.db.models import Flow, Membership, MembershipStatus, Payment, PaymentStatus
+from bot.db.models import (
+    Flow,
+    Membership,
+    MembershipStatus,
+    Payment,
+    PaymentStatus,
+    User,
+)
 
 
 async def has_valid_access(
@@ -15,6 +22,12 @@ async def has_valid_access(
     exclude_membership_ids: Collection[int] = (),
 ) -> bool:
     """Return whether revoking Telegram access would be unsafe for this user."""
+    access_exempt = await session.execute(
+        select(User.access_exempt).where(User.id == user_id)
+    )
+    if access_exempt.scalar_one_or_none() is True:
+        return True
+
     membership_query = (
         select(Membership.id)
         .where(Membership.user_id == user_id)

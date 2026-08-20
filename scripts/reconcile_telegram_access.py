@@ -60,7 +60,7 @@ async def _inactive_tg_ids() -> list[int]:
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             select(User.tg_id)
-            .where(~active_membership, ~future_payment)
+            .where(User.access_exempt.is_(False), ~active_membership, ~future_payment)
             .order_by(User.id)
         )
         return list(result.scalars().all())

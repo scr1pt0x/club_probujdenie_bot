@@ -135,7 +135,7 @@ def users_search_kb() -> InlineKeyboardMarkup:
     return back_menu_kb("admin:menu")
 
 
-def user_card_kb(user_id: int) -> InlineKeyboardMarkup:
+def user_card_kb(user_id: int, *, access_exempt: bool = False) -> InlineKeyboardMarkup:
     rows = [
         [
             InlineKeyboardButton(
@@ -149,6 +149,16 @@ def user_card_kb(user_id: int) -> InlineKeyboardMarkup:
             InlineKeyboardButton(
                 text="➕ Продлить на 7 дней",
                 callback_data=f"admin:users:extend7:{user_id}",
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                text=(
+                    "🔓 Снять льготную защиту"
+                    if access_exempt
+                    else "🛡 Сделать льготницей"
+                ),
+                callback_data=f"admin:users:exempt:{user_id}",
             ),
         ],
         [

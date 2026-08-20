@@ -25,17 +25,23 @@ class FakeSession:
 
 
 def test_current_membership_grants_access_without_payment_lookup():
-    session = FakeSession([123])
-    assert asyncio.run(has_valid_access(session, 7, NOW))
-    assert session.executions == 1
-
-
-def test_paid_future_flow_protects_access_when_membership_is_missing():
-    session = FakeSession([None, 456])
+    session = FakeSession([False, 123])
     assert asyncio.run(has_valid_access(session, 7, NOW))
     assert session.executions == 2
 
 
+def test_paid_future_flow_protects_access_when_membership_is_missing():
+    session = FakeSession([False, None, 456])
+    assert asyncio.run(has_valid_access(session, 7, NOW))
+    assert session.executions == 3
+
+
 def test_user_without_membership_or_payment_has_no_access():
-    session = FakeSession([None, None])
+    session = FakeSession([False, None, None])
     assert not asyncio.run(has_valid_access(session, 7, NOW))
+
+
+def test_access_exempt_user_is_protected_without_membership_or_payment_lookup():
+    session = FakeSession([True])
+    assert asyncio.run(has_valid_access(session, 7, NOW))
+    assert session.executions == 1

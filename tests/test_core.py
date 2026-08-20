@@ -5,11 +5,15 @@ from types import SimpleNamespace
 import httpx
 
 from bot.access_control import service as access_service
+from bot.admin.keyboards import user_card_kb
+from bot.admin.templates import DEFAULT_TEMPLATES, TEMPLATE_LABELS
 from bot.db.models import MembershipStatus
-from bot.handlers.menu import _shop_menu_kb
+from bot.handlers.menu import _pay_later_screen, _shop_menu_kb
 from bot.payments.verification import validate_remote_payment
 from bot.services import memberships as membership_service
 from bot.services import payments as payment_service
+from bot.services.flows import sales_window_for_start
+from bot.services.memberships import PayLaterEligibility
 from bot.ui.formatters import format_flow_period, format_local_date, format_price_rub
 from bot.ui.keyboards import main_menu_kb
 from bot.ui.messages import split_message
@@ -39,6 +43,24 @@ def test_main_menu_exposes_status_and_keeps_primary_actions_first():
     assert labels[-1] == ["💬 Помощь"]
 
 
+def test_admin_card_makes_complimentary_protection_explicit():
+    normal_labels = [
+        button.text for row in user_card_kb(7).inline_keyboard for button in row
+    ]
+    exempt_labels = [
+        button.text
+        for row in user_card_kb(7, access_exempt=True).inline_keyboard
+        for button in row
+    ]
+    assert "🛡 Сделать льготницей" in normal_labels
+    assert "🔓 Снять льготную защиту" in exempt_labels
+
+
+def test_legacy_pay_later_template_is_not_exposed_in_admin():
+    assert "pay_later_unavailable" not in DEFAULT_TEMPLATES
+    assert "pay_later_unavailable" not in TEMPLATE_LABELS
+
+
 def test_long_telegram_messages_are_split_without_data_loss():
     text = "A" * 30 + "\n" + "B" * 30
     chunks = split_message(text, limit=40)
@@ -52,6 +74,38 @@ def test_tariffs_have_one_personal_checkout_instead_of_conflicting_prices():
     assert len(buttons) == 2
     assert buttons[0][0].callback_data == "shop:order:personal"
     assert buttons[-1][0].callback_data == "nav:home"
+
+
+def test_pay_later_screen_never_appends_internal_no_membership_note():
+    deadline = NOW + timedelta(days=3)
+    text, _ = _pay_later_screen(
+        PayLaterEligibility(True, "Отсрочка доступна.", deadline=deadline)
+    )
+    assert "23.08.2026" in text
+    assert "нет активного участия" not in text
+    assert "(" not in text
+
+
+def test_sales_window_is_exactly_one_week_before_and_after_start():
+    start = NOW + timedelta(days=10)
+    open_at, close_at = sales_window_for_start(start)
+    assert open_at == start - timedelta(days=7)
+    assert close_at == start + timedelta(days=7)
+
+
+def test_payment_is_not_attached_to_future_flow_outside_sales_window(monkeypatch):
+    calls = []
+
+    async def no_open_flow(_session, now):
+        calls.append(now)
+        return None
+
+    monkeypatch.setattr(
+        payment_service.flow_repo, "get_paid_flow_in_sales_window", no_open_flow
+    )
+    flow_id = run(payment_service.resolve_flow_for_payment(SimpleNamespace(), NOW))
+    assert flow_id is None
+    assert calls == [NOW]
 
 
 def test_grant_access_never_kicks_an_existing_member(monkeypatch):

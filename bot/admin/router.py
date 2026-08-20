@@ -39,6 +39,7 @@ from bot.repositories.users import (
     get_user_by_username,
     lock_user_by_id,
 )
+from bot.services.entitlements import has_valid_access
 from bot.services.flows import sales_window_for_start
 from bot.services.mailings import send_custom_broadcast
 from bot.services.memberships import compute_grace_end
@@ -764,6 +765,14 @@ async def admin_section(
             return
 
         if action == "revoke":
+            if user.access_exempt:
+                await session.rollback()
+                await callback.message.answer(
+                    "🛡 У участницы включён льготный доступ. Сначала явно "
+                    "снимите льготную защиту в её карточке."
+                )
+                await callback.answer()
+                return
             access_result = await revoke_access(callback.message.bot, user.tg_id)
             if access_result.protected:
                 await session.rollback()
@@ -799,6 +808,31 @@ async def admin_section(
             await callback.message.answer(
                 f"⛔ Доступ забран из канала и группы. "
                 f"Закрыто активных участий: {expired_count}."
+            )
+            await callback.answer()
+            return
+
+        if action == "exempt":
+            user.access_exempt = not user.access_exempt
+            await add_audit_log(
+                session,
+                action="admin_user_action",
+                payload={
+                    "tg_id": user.tg_id,
+                    "action": (
+                        "enable_access_exempt"
+                        if user.access_exempt
+                        else "disable_access_exempt"
+                    ),
+                    "actor_tg_id": callback.from_user.id,
+                },
+                actor_user_id=admin_user.id,
+            )
+            await session.commit()
+            await callback.message.answer(
+                "🛡 Льготный доступ включён: автоматические исключения запрещены."
+                if user.access_exempt
+                else "🔓 Льготная защита снята."
             )
             await callback.answer()
             return
@@ -1115,17 +1149,14 @@ async def user_search_handler(
 
     membership = await membership_repo.get_latest_membership(session, user_id=user.id)
     now = datetime.now(timezone.utc)
-    has_access = (
-        membership is not None
-        and membership.status == MembershipStatus.ACTIVE
-        and membership.access_end_at >= now
-    )
+    has_access = await has_valid_access(session, user.id, now)
 
     lines = [
         f"tg_id: {user.tg_id}",
         f"username: @{user.username}" if user.username else "username: —",
         f"имя: {user.first_name or ''} {user.last_name or ''}".strip() or "имя: —",
         f"доступ сейчас: {'да' if has_access else 'нет'}",
+        f"льготная защита: {'включена' if user.access_exempt else 'нет'}",
     ]
 
     if membership:
@@ -1146,7 +1177,10 @@ async def user_search_handler(
         lines.append("участие: нет")
 
     await state.clear()
-    await message.answer("\n".join(lines), reply_markup=user_card_kb(user.id))
+    await message.answer(
+        "\n".join(lines),
+        reply_markup=user_card_kb(user.id, access_exempt=user.access_exempt),
+    )
 
 
 @router.message(PromoCreateState.waiting_code)

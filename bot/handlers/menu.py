@@ -25,7 +25,11 @@ from bot.repositories import memberships as membership_repo
 from bot.repositories import promos as promo_repo
 from bot.repositories.users import get_or_create_user, lock_user_by_id
 from bot.services.flows import get_next_paid_flow
-from bot.services.memberships import compute_grace_end, evaluate_pay_later
+from bot.services.memberships import (
+    PayLaterEligibility,
+    compute_grace_end,
+    evaluate_pay_later,
+)
 from bot.services.payments import (
     calculate_price_rub,
     confirm_payment,
@@ -1000,31 +1004,7 @@ async def pay_later_menu_handler(message: types.Message, session: AsyncSession) 
     await session.commit()
 
     eligibility = await evaluate_pay_later(session, user.id, now)
-    if eligibility.eligible and eligibility.deadline:
-        keyboard = types.InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    types.InlineKeyboardButton(
-                        text="Подтвердить отсрочку", callback_data="pay_later"
-                    )
-                ],
-                [
-                    types.InlineKeyboardButton(
-                        text="← Главное меню", callback_data="nav:home"
-                    )
-                ],
-            ]
-        )
-        text = (
-            "⏳ Оплатить позже\n\n"
-            f"Доступ сохранится до {format_local_date(eligibility.deadline)}.\n"
-            "После этой даты при отсутствии оплаты бот исключит вас из канала "
-            "и группы. Действие включится только после подтверждения."
-        )
-    else:
-        reason = eligibility.message.replace("Опция недоступна: ", "")
-        text = f"⏳ Отсрочка сейчас недоступна\n\n{reason}"
-        keyboard = back_home_kb()
+    text, keyboard = _pay_later_screen(eligibility)
     await send_clean_screen(message, text, reply_markup=keyboard)
 
 
@@ -1043,6 +1023,14 @@ async def pay_later_navigation_handler(
     )
     await session.commit()
     eligibility = await evaluate_pay_later(session, user.id, now)
+    text, keyboard = _pay_later_screen(eligibility)
+    await edit_screen(callback.message, text, reply_markup=keyboard)
+    await callback.answer()
+
+
+def _pay_later_screen(
+    eligibility: PayLaterEligibility,
+) -> tuple[str, types.InlineKeyboardMarkup]:
     if eligibility.eligible and eligibility.deadline:
         keyboard = types.InlineKeyboardMarkup(
             inline_keyboard=[
@@ -1068,8 +1056,7 @@ async def pay_later_navigation_handler(
         reason = eligibility.message.replace("Опция недоступна: ", "")
         text = f"⏳ Отсрочка сейчас недоступна\n\n{reason}"
         keyboard = back_home_kb()
-    await edit_screen(callback.message, text, reply_markup=keyboard)
-    await callback.answer()
+    return text, keyboard
 
 
 async def _schedule_content(session: AsyncSession) -> str:

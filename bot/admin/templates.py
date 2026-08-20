@@ -17,7 +17,6 @@ DEFAULT_TEMPLATES: dict[str, str] = {
         "стоимость доступны в разделе «✨ Участие»."
     ),
     "pay_unavailable": "Оплата скоро будет подключена. Сейчас тестовый режим.",
-    "pay_later_unavailable": "Опция «Оплачу позже» сейчас недоступна.",
     "payment_success": (
         "Оплата подтверждена. Доступ активирован.\n"
         "Нажмите кнопки ниже и отправьте заявку на вступление."
@@ -117,7 +116,6 @@ TEMPLATE_LABELS: dict[str, str] = {
     "sales_closed": "⛔ Набор закрыт",
     "free_access_disabled": "⛔ Бесплатный вход отключён",
     "pay_unavailable": "💳 Оплата",
-    "pay_later_unavailable": "⏳ Оплачу позже — недоступно",
     "payment_success": "💳 Оплата — успех",
     "payment_success_no_links": "💳 Оплата — успех (без ссылок)",
     "payment_failed": "💳 Оплата — ошибка",
