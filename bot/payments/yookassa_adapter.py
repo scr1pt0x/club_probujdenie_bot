@@ -7,7 +7,6 @@ import httpx
 from bot.db.models import PaymentStatus
 from config import settings
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -24,7 +23,11 @@ class YooKassaAdapter:
         return f"{Decimal(amount_rub):.2f}"
 
     async def create_payment(
-        self, amount_rub: int, description: str, metadata: dict, internal_payment_id: int
+        self,
+        amount_rub: int,
+        description: str,
+        metadata: dict,
+        internal_payment_id: int,
     ) -> tuple[str, str]:
         headers = {
             "Authorization": self._auth_header(),

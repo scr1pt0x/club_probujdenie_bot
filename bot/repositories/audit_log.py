@@ -15,9 +15,7 @@ async def add_audit_log(
     return entry
 
 
-async def has_action_with_key(
-    session: AsyncSession, action: str, key: str
-) -> bool:
+async def has_action_with_key(session: AsyncSession, action: str, key: str) -> bool:
     result = await session.execute(
         select(AuditLog.id)
         .where(AuditLog.action == action)

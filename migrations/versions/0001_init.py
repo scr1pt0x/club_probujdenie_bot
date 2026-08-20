@@ -1,14 +1,14 @@
 """initial schema
 
 Revision ID: 0001_init
-Revises: 
+Revises:
 Create Date: 2026-01-30
 
 """
-from alembic import op
-import sqlalchemy as sa
-from sqlalchemy.dialects import postgresql
 
+import sqlalchemy as sa
+from alembic import op
+from sqlalchemy.dialects import postgresql
 
 revision = "0001_init"
 down_revision = None
@@ -54,9 +54,7 @@ def upgrade() -> None:
         sa.Column("external_id", sa.String(length=128), nullable=False),
         sa.Column(
             "status",
-            sa.Enum(
-                "pending", "paid", "failed", "expired", name="payment_status"
-            ),
+            sa.Enum("pending", "paid", "failed", "expired", name="payment_status"),
             nullable=False,
         ),
         sa.Column("amount_rub", sa.Integer(), nullable=False),
@@ -77,9 +75,7 @@ def upgrade() -> None:
         sa.Column("flow_id", sa.Integer(), nullable=False),
         sa.Column(
             "status",
-            sa.Enum(
-                "active", "expired", "canceled", name="membership_status"
-            ),
+            sa.Enum("active", "expired", "canceled", name="membership_status"),
             nullable=False,
         ),
         sa.Column("access_start_at", sa.DateTime(timezone=True), nullable=False),

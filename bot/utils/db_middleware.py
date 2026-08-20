@@ -15,5 +15,8 @@ class DbSessionMiddleware(BaseMiddleware):
     ) -> Any:
         async with AsyncSessionLocal() as session:
             data["session"] = session
-            result = await handler(event, data)
-            return result
+            try:
+                return await handler(event, data)
+            except Exception:
+                await session.rollback()
+                raise

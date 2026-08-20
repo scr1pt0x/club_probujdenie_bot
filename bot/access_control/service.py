@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime, timedelta, timezone
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError
@@ -34,6 +35,7 @@ async def _safe_invite_link(bot: Bot, chat_id: int, tg_id: int) -> str | None:
             chat_id=chat_id,
             creates_join_request=True,
             name=f"access-{tg_id}",
+            expire_date=datetime.now(timezone.utc) + timedelta(hours=24),
         )
         return link.invite_link
     except TelegramAPIError:

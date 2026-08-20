@@ -1,16 +1,15 @@
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from aiogram import Router, types
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bot.repositories.users import get_or_create_user
 from bot.repositories import memberships as membership_repo
-from bot.services.flows import get_next_paid_flow
-from bot.services.memberships import apply_pay_later
+from bot.repositories.users import get_or_create_user
+from bot.services.memberships import apply_pay_later, evaluate_pay_later
+from bot.ui.formatters import format_local_date
 from config import settings
-
 
 router = Router()
 
@@ -24,6 +23,7 @@ def _pay_later_keyboard() -> InlineKeyboardMarkup:
 
 
 @router.message(Command("status"))
+@router.message(lambda m: m.text == "👤 Мой статус")
 async def status_handler(message: types.Message, session: AsyncSession) -> None:
     now = datetime.now(timezone.utc)
     user = await get_or_create_user(
@@ -36,17 +36,37 @@ async def status_handler(message: types.Message, session: AsyncSession) -> None:
     )
     await session.commit()
     membership = await membership_repo.get_active_membership(session, user_id=user.id)
-    next_flow = await get_next_paid_flow(session, now)
-
-    text = "Статус: нет активной подписки."
+    text = (
+        "👤 Статус участия\n\n"
+        "Активного доступа сейчас нет.\n"
+        "Чтобы присоединиться, откройте «🛍 Тарифы»."
+    )
     keyboard = None
     if membership:
-        text = (
-            "Статус: активная подписка.\n"
-            f"Доступ до: {membership.access_end_at.date()}\n"
-        )
-        if next_flow and now < next_flow.start_at:
+        if membership.access_end_at >= now:
+            text = (
+                "👤 Статус участия\n\n"
+                "✅ Доступ активен\n"
+                f"Доступ до: {format_local_date(membership.access_end_at)}"
+            )
+        elif membership.grace_end_at >= now:
+            text = (
+                "👤 Статус участия\n\n"
+                "Доступ завершён. Сейчас ещё действует льготный период продления.\n"
+                "Льготная цена доступна до: "
+                f"{format_local_date(membership.grace_end_at)}"
+            )
+
+        pay_later = await evaluate_pay_later(session, user.id, now)
+        if pay_later.eligible:
             keyboard = _pay_later_keyboard()
+        elif (
+            membership.pay_later_deadline_at and membership.pay_later_deadline_at > now
+        ):
+            text += (
+                "\n⏳ Отсрочка до: "
+                f"{format_local_date(membership.pay_later_deadline_at)}"
+            )
 
     await message.answer(text, reply_markup=keyboard)
 

@@ -1,21 +1,19 @@
-from datetime import datetime, timezone
 import logging
+from datetime import datetime, timezone
 
 from aiogram import Bot, types
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from bot.access_control.service import grant_access
 from bot.db.models import Payment, PaymentStatus
 from bot.repositories import flows as flow_repo
 from bot.repositories import memberships as membership_repo
+from bot.repositories import users as user_repo
+from bot.repositories.audit_log import add_audit_log, has_action_with_key
 from bot.services import memberships as membership_service
 from bot.services.promos import apply_promo_to_price
 from bot.services.settings import get_effective_settings
 from bot.services.texts import get_text
-from config import settings
-from bot.access_control.service import grant_access
-from bot.repositories import users as user_repo
-from bot.repositories.audit_log import add_audit_log, has_action_with_key
-
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +77,9 @@ async def notify_payment_status(
     reply_markup: types.InlineKeyboardMarkup | None = None,
     dedupe_key: str | None = None,
 ) -> None:
-    if dedupe_key and await has_action_with_key(session, "payment_notice_sent", dedupe_key):
+    if dedupe_key and await has_action_with_key(
+        session, "payment_notice_sent", dedupe_key
+    ):
         return
     user = await user_repo.get_user_by_id(session, user_id)
     if not user:
@@ -152,8 +152,10 @@ async def confirm_payment(
 
     paid_at = paid_at or datetime.now(timezone.utc)
     early_flow_id = await resolve_early_full_payment_flow(session, payment, paid_at)
-    flow_id = payment.flow_id or early_flow_id or await resolve_flow_for_payment(
-        session, paid_at
+    flow_id = (
+        payment.flow_id
+        or early_flow_id
+        or await resolve_flow_for_payment(session, paid_at)
     )
     if flow_id is None:
         # Критично: нельзя помечать PAID без привязки к потоку.

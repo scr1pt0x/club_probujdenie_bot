@@ -1,5 +1,3 @@
-from datetime import datetime
-
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -15,14 +13,12 @@ async def get_payment_by_external_id(
     return result.scalar_one_or_none()
 
 
-async def list_pending_payments(
-    session: AsyncSession, now: datetime
-) -> list[Payment]:
+async def list_pending_payments(session: AsyncSession) -> list[Payment]:
     result = await session.execute(
         select(Payment)
         .where(Payment.status == PaymentStatus.PENDING)
         .where(Payment.external_id.is_not(None))
         .where(Payment.external_id != "")
-        .where((Payment.expires_at.is_(None)) | (Payment.expires_at >= now))
+        .order_by(Payment.created_at.asc())
     )
     return list(result.scalars().all())

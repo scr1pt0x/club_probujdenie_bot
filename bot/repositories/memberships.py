@@ -23,8 +23,9 @@ async def get_membership_by_flow(
     session: AsyncSession, user_id: int, flow_id: int
 ) -> Membership | None:
     result = await session.execute(
-        select(Membership)
-        .where(Membership.user_id == user_id, Membership.flow_id == flow_id)
+        select(Membership).where(
+            Membership.user_id == user_id, Membership.flow_id == flow_id
+        )
     )
     return result.scalar_one_or_none()
 

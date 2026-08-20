@@ -6,7 +6,6 @@ from bot.db.session import AsyncSessionLocal
 from bot.scheduler import jobs
 from config import settings
 
-
 logger = logging.getLogger(__name__)
 
 

@@ -8,14 +8,19 @@ from sqlalchemy import distinct, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.admin.templates import DEFAULT_TEMPLATES
-from bot.db.models import Flow, Membership, MembershipStatus, Payment, PaymentStatus, User
+from bot.db.models import (
+    Flow,
+    Membership,
+    MembershipStatus,
+    Payment,
+    PaymentStatus,
+    User,
+)
 from bot.repositories import flows as flow_repo
 from bot.repositories.audit_log import add_audit_log, has_action_with_key
 from bot.repositories.message_templates import get_template_by_key
-from bot.services.texts import get_text
-from config import settings
 from bot.services.settings import get_mailings_enabled
-
+from config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -97,8 +102,12 @@ async def _send_bulk(
             await bot.send_message(tg_id, text)
             sent += 1
         except Exception:
-            # Ошибки Telegram API не должны останавливать рассылку
-            pass
+            # Ошибки Telegram API не должны останавливать рассылку.
+            logger.warning(
+                "Failed to deliver mailing message",
+                extra={"user_id": user_id, "mailing_key": mailing_key},
+                exc_info=True,
+            )
         await asyncio.sleep(delay_seconds)
 
     if idempotent and mailing_key:
@@ -223,16 +232,12 @@ async def _get_current_unpaid_transition_user_ids(
     return result
 
 
-async def send_auto_end_mailings(
-    session: AsyncSession, bot: Bot, now: datetime
-) -> int:
+async def send_auto_end_mailings(session: AsyncSession, bot: Bot, now: datetime) -> int:
     tz = ZoneInfo(settings.scheduler_timezone)
     now_utc = now.astimezone(timezone.utc)
     enabled = await get_mailings_enabled(session)
     today_local = now_utc.astimezone(tz).date()
-    window_start = datetime.combine(
-        today_local - timedelta(days=7), time.min, tz
-    )
+    window_start = datetime.combine(today_local - timedelta(days=7), time.min, tz)
     window_end = datetime.combine(today_local + timedelta(days=1), time.max, tz)
     result = await session.execute(
         select(Flow).where(Flow.end_at >= window_start, Flow.end_at <= window_end)
@@ -268,9 +273,7 @@ async def send_auto_end_mailings(
             already_in_next_paid_flow = await _get_flow_participant_user_ids(
                 session, next_paid_flow.id
             )
-            user_ids = [
-                uid for uid in user_ids if uid not in already_in_next_paid_flow
-            ]
+            user_ids = [uid for uid in user_ids if uid not in already_in_next_paid_flow]
         if not user_ids:
             await add_audit_log(
                 session, action="mailing_sent", payload={"key": key, "count": 0}
@@ -365,6 +368,11 @@ async def send_pay_later_deadline_reminders(
             sent += 1
             await add_audit_log(session, "mailing_sent", {"key": key, "count": 1})
         except Exception:
+            logger.warning(
+                "Failed to deliver pay-later reminder",
+                extra={"user_id": membership.user_id, "membership_id": membership.id},
+                exc_info=True,
+            )
             await add_audit_log(session, "mailing_sent", {"key": key, "count": 0})
 
     logger.info(

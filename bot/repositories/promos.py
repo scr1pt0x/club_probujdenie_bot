@@ -50,34 +50,50 @@ async def disable_promo(session: AsyncSession, code: str) -> bool:
     return True
 
 
-async def add_user_promo(
-    session: AsyncSession, user_id: int, code: str
-) -> None:
-    existing = await get_user_promo(session, user_id, code)
+async def add_user_promo(session: AsyncSession, user_id: int, code: str) -> bool:
+    normalized_code = code.upper()
+    result = await session.execute(
+        select(PromoCode).where(PromoCode.code == normalized_code).with_for_update()
+    )
+    promo = result.scalar_one_or_none()
+    now = datetime.now(timezone.utc)
+    if promo is None or not promo.active:
+        return False
+    if promo.starts_at and now < promo.starts_at:
+        return False
+    if promo.ends_at and now > promo.ends_at:
+        return False
+
+    existing = await get_user_promo(session, user_id, normalized_code)
     if existing:
-        existing.applied_at = datetime.now(timezone.utc)
-        return
-    promo = await get_promo_by_code(session, code)
-    if promo is not None:
-        promo.used_count = (promo.used_count or 0) + 1
-    session.add(UserPromo(user_id=user_id, code=code.upper()))
+        return True
+    if promo.max_uses is not None and promo.used_count >= promo.max_uses:
+        return False
+
+    promo.used_count = (promo.used_count or 0) + 1
+    session.add(UserPromo(user_id=user_id, code=normalized_code))
+    return True
 
 
-async def get_latest_user_promo(session: AsyncSession, user_id: int) -> UserPromo | None:
+async def get_latest_user_promo(
+    session: AsyncSession, user_id: int
+) -> UserPromo | None:
     result = await session.execute(
         select(UserPromo)
         .where(UserPromo.user_id == user_id)
-        .order_by(UserPromo.applied_at.desc())
+        .order_by(UserPromo.applied_at.desc(), UserPromo.code.desc())
+        .limit(1)
     )
-    return result.scalar_one_or_none()
+    return result.scalars().first()
 
 
 async def get_user_promo(
     session: AsyncSession, user_id: int, code: str
 ) -> UserPromo | None:
     result = await session.execute(
-        select(UserPromo)
-        .where(UserPromo.user_id == user_id, UserPromo.code == code.upper())
+        select(UserPromo).where(
+            UserPromo.user_id == user_id, UserPromo.code == code.upper()
+        )
     )
     return result.scalar_one_or_none()
 

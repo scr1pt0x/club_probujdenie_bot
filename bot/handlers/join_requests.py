@@ -5,9 +5,9 @@ from aiogram import Router, types
 from aiogram.exceptions import TelegramAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bot.repositories.users import get_user_by_tg_id
 from bot.repositories.memberships import get_active_membership
-
+from bot.repositories.users import get_user_by_tg_id
+from config import settings
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -17,6 +17,13 @@ logger = logging.getLogger(__name__)
 async def approve_join_request(
     join_request: types.ChatJoinRequest, session: AsyncSession
 ) -> None:
+    allowed_chat_ids = {
+        settings.primary_channel_id,
+        settings.secondary_discussion_id,
+    }
+    if join_request.chat.id not in allowed_chat_ids:
+        return
+
     user = await get_user_by_tg_id(session, join_request.from_user.id)
     if user is None:
         try:

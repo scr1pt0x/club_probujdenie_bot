@@ -2,21 +2,23 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from aiogram import Router, types
+from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from sqlalchemy import select
-
+from bot.access_control.service import grant_access
+from bot.db.models import Flow, Membership, MembershipStatus, Payment, PaymentStatus
+from bot.payments.verification import validate_remote_payment
+from bot.payments.yookassa_adapter import YooKassaAdapter
 from bot.repositories import flows as flow_repo
 from bot.repositories import memberships as membership_repo
 from bot.repositories import promos as promo_repo
 from bot.repositories.users import get_or_create_user
 from bot.services.flows import get_next_paid_flow
-from bot.services.memberships import compute_grace_end
-from bot.services.memberships import apply_pay_later
+from bot.services.memberships import apply_pay_later, compute_grace_end
 from bot.services.payments import calculate_price_rub, confirm_payment
-from bot.payments.yookassa_adapter import YooKassaAdapter
 from bot.services.promos import is_promo_valid
 from bot.services.settings import (
     get_effective_settings,
@@ -24,11 +26,9 @@ from bot.services.settings import (
     get_shop_prices,
 )
 from bot.services.texts import get_text
-from bot.access_control.service import grant_access
-from bot.db.models import Flow, Membership, MembershipStatus, Payment, PaymentStatus
+from bot.ui.formatters import format_flow_period, format_local_date, format_price_rub
+from bot.ui.keyboards import main_menu_kb
 from config import settings
-
-
 
 router = Router()
 
@@ -37,18 +37,40 @@ class PromoCodeState(StatesGroup):
     waiting_code = State()
 
 
-def _metadata_matches_payment(remote: dict, payment: Payment, user_id: int) -> bool:
-    metadata = remote.get("metadata") or {}
-    remote_internal_id = metadata.get("internal_payment_id")
-    remote_user_id = metadata.get("user_id")
-    try:
-        if remote_internal_id is not None and int(remote_internal_id) != payment.id:
-            return False
-        if remote_user_id is not None and int(remote_user_id) != user_id:
-            return False
-    except (TypeError, ValueError):
-        return False
-    return True
+def _cancel_input_kb() -> types.InlineKeyboardMarkup:
+    return types.InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                types.InlineKeyboardButton(
+                    text="❌ Отменить", callback_data="user:input:cancel"
+                )
+            ]
+        ]
+    )
+
+
+@router.message(Command("cancel"))
+@router.callback_query(lambda c: c.data == "user:input:cancel")
+async def cancel_input_handler(
+    event: types.Message | types.CallbackQuery, state: FSMContext
+) -> None:
+    await state.clear()
+    if isinstance(event, types.CallbackQuery):
+        await event.message.answer("Ввод отменён.", reply_markup=main_menu_kb())
+        await event.answer()
+    else:
+        await event.answer("Ввод отменён.", reply_markup=main_menu_kb())
+
+
+def _payment_validation_error(remote: dict, payment: Payment) -> str | None:
+    return validate_remote_payment(
+        remote,
+        external_id=payment.external_id or "",
+        internal_payment_id=payment.id,
+        user_id=payment.user_id,
+        amount_rub=payment.amount_rub,
+        currency=payment.currency,
+    )
 
 
 async def _find_paid_payment_with_active_flow(
@@ -151,7 +173,7 @@ async def _resolve_free_access_flow(
             return active_paid.id
         return active_membership.flow_id
 
-    # Новые участницы: сначала платный поток; при включённых бесплатных — затем бесплатный.
+    # Новые участницы: сначала платный поток, затем бесплатный (если включён).
     next_paid = await flow_repo.get_next_paid_flow(session, now)
     if next_paid:
         return next_paid.id
@@ -183,7 +205,7 @@ async def _send_personal_payment_link(
     await session.commit()
 
     # Оплата за текущий ещё действующий поток: обычно только повторяем ссылки.
-    # Исключение: открыт набор в следующем потоке и за него ещё не платили — выставляем продление.
+    # Если открыт следующий поток и за него не платили, выставляем продление.
     if await _find_paid_payment_with_active_flow(session, user.id, now) is not None:
         if not await _should_offer_renewal_checkout(session, user.id, now):
             await _close_duplicate_pending_payments(session, user.id, now)
@@ -243,9 +265,10 @@ async def _send_personal_payment_link(
         adapter = YooKassaAdapter()
         try:
             remote = await adapter.get_payment(existing_pending.external_id)
-            if not _metadata_matches_payment(remote, existing_pending, user.id):
+            if _payment_validation_error(remote, existing_pending):
                 await responder.answer(
-                    "Не удалось безопасно подтвердить принадлежность счета. Создаю новый платеж."
+                    "Не удалось безопасно подтвердить принадлежность счёта. "
+                    "Создаю новый платёж."
                 )
                 existing_pending.status = PaymentStatus.FAILED
                 await session.commit()
@@ -266,17 +289,23 @@ async def _send_personal_payment_link(
                     if url:
                         keyboard = types.InlineKeyboardMarkup(
                             inline_keyboard=[
-                                [types.InlineKeyboardButton(text="🔗 Оплатить", url=url)],
                                 [
                                     types.InlineKeyboardButton(
-                                        text="✅ Я уже оплатила, проверить",
+                                        text="💳 Перейти к оплате", url=url
+                                    )
+                                ],
+                                [
+                                    types.InlineKeyboardButton(
+                                        text="🔄 Проверить оплату",
                                         callback_data="payment:refresh",
                                     )
                                 ],
                             ]
                         )
                         await responder.answer(
-                            f"У вас уже есть активный счёт на {price} ₽",
+                            "💳 У вас уже есть активный счёт\n\n"
+                            f"Сумма: {format_price_rub(price)} ₽\n"
+                            "Если вы уже оплатили, проверка обычно занимает до минуты.",
                             reply_markup=keyboard,
                         )
                         return
@@ -313,17 +342,23 @@ async def _send_personal_payment_link(
 
     keyboard = types.InlineKeyboardMarkup(
         inline_keyboard=[
-            [types.InlineKeyboardButton(text="🔗 Оплатить", url=confirmation_url)],
             [
                 types.InlineKeyboardButton(
-                    text="✅ Я уже оплатила, проверить",
+                    text="💳 Перейти к оплате", url=confirmation_url
+                )
+            ],
+            [
+                types.InlineKeyboardButton(
+                    text="🔄 Проверить оплату",
                     callback_data="payment:refresh",
                 )
             ],
         ]
     )
     await responder.answer(
-        f"Ваша персональная стоимость участия: {price} ₽",
+        "💳 Счёт готов\n\n"
+        f"Ваша стоимость: {format_price_rub(price)} ₽\n"
+        "Ссылка действует 1 час. После оплаты доступ появится автоматически.",
         reply_markup=keyboard,
     )
 
@@ -333,26 +368,16 @@ async def pay_handler(message: types.Message, session: AsyncSession) -> None:
     await _send_personal_payment_link(session, message.from_user, message)
 
 
-def _format_price(value: int) -> str:
-    return f"{value:,}".replace(",", " ")
-
-
 def _shop_menu_kb(
-    prices: dict[str, int], free_label: str, *, include_free_offer: bool
+    free_label: str, *, include_free_offer: bool
 ) -> types.InlineKeyboardMarkup:
     rows: list[list[types.InlineKeyboardButton]] = [
         [
             types.InlineKeyboardButton(
-                text=f"💳 Оплатить {_format_price(prices['intro'])} ₽",
-                callback_data="shop:pay:intro",
+                text="💳 Узнать мою цену и оплатить",
+                callback_data="shop:order:personal",
             )
-        ],
-        [
-            types.InlineKeyboardButton(
-                text=f"💳 Оплатить {_format_price(prices['renewal'])} ₽",
-                callback_data="shop:pay:renewal",
-            )
-        ],
+        ]
     ]
     if include_free_offer:
         rows.append(
@@ -391,7 +416,9 @@ def _shop_order_kb(order_key: str) -> types.InlineKeyboardMarkup:
     )
 
 
-def _access_links_kb(channel_link: str | None, group_link: str | None) -> types.InlineKeyboardMarkup | None:
+def _access_links_kb(
+    channel_link: str | None, group_link: str | None
+) -> types.InlineKeyboardMarkup | None:
     rows: list[list[types.InlineKeyboardButton]] = []
     if channel_link:
         rows.append(
@@ -416,65 +443,76 @@ async def shop_handler(message: types.Message, session: AsyncSession) -> None:
     free_desc = await get_text(session, "shop_free_desc")
     lines = [
         f"{title}",
-        f"- {intro_desc} — {_format_price(prices['intro'])} ₽",
-        f"- {renewal_desc} — {_format_price(prices['renewal'])} ₽",
+        "",
+        f"• {intro_desc} — {format_price_rub(prices['intro'])} ₽",
+        f"• {renewal_desc} — {format_price_rub(prices['renewal'])} ₽",
     ]
     if settings.free_flows_enabled:
-        lines.append(f"- {free_desc} — {free_label}")
+        lines.append(f"• {free_desc} — {free_label}")
+    lines.extend(
+        [
+            "",
+            "Бот сам определит вашу персональную стоимость перед созданием счёта.",
+        ]
+    )
     await message.answer(
         "\n".join(lines),
         reply_markup=_shop_menu_kb(
-            prices, free_label, include_free_offer=settings.free_flows_enabled
+            free_label, include_free_offer=settings.free_flows_enabled
         ),
     )
 
 
 @router.callback_query(lambda c: c.data == "shop:pay:intro")
-async def shop_intro_detail(callback: types.CallbackQuery, session: AsyncSession) -> None:
+async def shop_intro_detail(
+    callback: types.CallbackQuery, session: AsyncSession
+) -> None:
     prices = await get_shop_prices(session)
     intro_desc = await get_text(session, "shop_intro_desc")
     flow = await get_next_paid_flow(session, datetime.now(timezone.utc))
     flow_info = (
-        f"\nБлижайший поток: {flow.start_at.date()} → {flow.end_at.date()}"
+        f"\nБлижайший поток: {format_flow_period(flow.start_at, flow.end_at)}"
         if flow
         else ""
     )
     await callback.message.answer(
-        f"{intro_desc} — {_format_price(prices['intro'])} ₽\n"
+        f"{intro_desc} — базовая цена {format_price_rub(prices['intro'])} ₽\n"
         "Доступ: канал + группа\n"
         "Длительность: 5 недель"
         f"{flow_info}\n"
-        "Далее нажмите оплатить",
-        reply_markup=_shop_checkout_kb("intro", f"{_format_price(prices['intro'])} ₽"),
+        "Перед оплатой бот рассчитает вашу персональную цену.",
+        reply_markup=_shop_order_kb("personal"),
     )
     await callback.answer()
 
 
 @router.callback_query(lambda c: c.data == "shop:pay:renewal")
-async def shop_renewal_detail(callback: types.CallbackQuery, session: AsyncSession) -> None:
+async def shop_renewal_detail(
+    callback: types.CallbackQuery, session: AsyncSession
+) -> None:
     prices = await get_shop_prices(session)
     renewal_desc = await get_text(session, "shop_renewal_desc")
     flow = await get_next_paid_flow(session, datetime.now(timezone.utc))
     flow_info = (
-        f"\nБлижайший поток: {flow.start_at.date()} → {flow.end_at.date()}"
+        f"\nБлижайший поток: {format_flow_period(flow.start_at, flow.end_at)}"
         if flow
         else ""
     )
     await callback.message.answer(
-        f"{renewal_desc} — {_format_price(prices['renewal'])} ₽\n"
+        f"{renewal_desc} — базовая цена {format_price_rub(prices['renewal'])} ₽\n"
         "Доступ: канал + группа\n"
         "Длительность: 5 недель"
         f"{flow_info}\n"
-        "Далее нажмите оплатить",
-        reply_markup=_shop_checkout_kb(
-            "renewal", f"{_format_price(prices['renewal'])} ₽"
-        ),
+        "Перед оплатой бот проверит право на цену продления.",
+        reply_markup=_shop_order_kb("personal"),
     )
     await callback.answer()
 
 
 @router.callback_query(lambda c: c.data == "shop:free")
-async def shop_free_detail(callback: types.CallbackQuery, session: AsyncSession) -> None:
+async def shop_free_detail(
+    callback: types.CallbackQuery, session: AsyncSession
+) -> None:
     if not settings.free_flows_enabled:
         await callback.message.answer(await get_text(session, "free_access_disabled"))
         await callback.answer()
@@ -490,35 +528,53 @@ async def shop_free_detail(callback: types.CallbackQuery, session: AsyncSession)
 
 
 @router.callback_query(lambda c: c.data == "shop:checkout:intro")
-async def shop_checkout_intro(callback: types.CallbackQuery, session: AsyncSession) -> None:
+async def shop_checkout_intro(
+    callback: types.CallbackQuery, session: AsyncSession
+) -> None:
     prices = await get_shop_prices(session)
     order_text = await get_text(session, "shop_order_text")
     await callback.message.answer(
-        f"{order_text}\nК оплате: {_format_price(prices['intro'])} ₽",
-        reply_markup=_shop_order_kb("intro"),
+        f"{order_text}\nБазовая цена: {format_price_rub(prices['intro'])} ₽\n"
+        "Точная сумма будет рассчитана перед созданием счёта.",
+        reply_markup=_shop_order_kb("personal"),
     )
     await callback.answer()
 
 
 @router.callback_query(lambda c: c.data == "shop:checkout:renewal")
-async def shop_checkout_renewal(callback: types.CallbackQuery, session: AsyncSession) -> None:
+async def shop_checkout_renewal(
+    callback: types.CallbackQuery, session: AsyncSession
+) -> None:
     prices = await get_shop_prices(session)
     order_text = await get_text(session, "shop_order_text")
     await callback.message.answer(
-        f"{order_text}\nК оплате: {_format_price(prices['renewal'])} ₽",
-        reply_markup=_shop_order_kb("renewal"),
+        f"{order_text}\nЦена продления: {format_price_rub(prices['renewal'])} ₽\n"
+        "Бот сначала проверит, доступна ли она вашему аккаунту.",
+        reply_markup=_shop_order_kb("personal"),
     )
     await callback.answer()
 
 
 @router.callback_query(lambda c: c.data == "shop:order:intro")
-async def shop_order_intro(callback: types.CallbackQuery, session: AsyncSession) -> None:
+async def shop_order_intro(
+    callback: types.CallbackQuery, session: AsyncSession
+) -> None:
     await _send_personal_payment_link(session, callback.from_user, callback.message)
     await callback.answer()
 
 
 @router.callback_query(lambda c: c.data == "shop:order:renewal")
-async def shop_order_renewal(callback: types.CallbackQuery, session: AsyncSession) -> None:
+async def shop_order_renewal(
+    callback: types.CallbackQuery, session: AsyncSession
+) -> None:
+    await _send_personal_payment_link(session, callback.from_user, callback.message)
+    await callback.answer()
+
+
+@router.callback_query(lambda c: c.data == "shop:order:personal")
+async def shop_order_personal(
+    callback: types.CallbackQuery, session: AsyncSession
+) -> None:
     await _send_personal_payment_link(session, callback.from_user, callback.message)
     await callback.answer()
 
@@ -581,18 +637,21 @@ async def payment_refresh_handler(
         return
 
     remote_status = remote.get("status")
-    if not _metadata_matches_payment(remote, pending_payment, user.id):
+    if _payment_validation_error(remote, pending_payment):
         pending_payment.status = PaymentStatus.FAILED
         await session.commit()
         await callback.message.answer(
-            "Не удалось безопасно подтвердить принадлежность счета. Создаю новый платеж..."
+            "Не удалось безопасно подтвердить принадлежность счёта. "
+            "Создаю новый платёж…"
         )
         await _send_personal_payment_link(session, callback.from_user, callback.message)
         await callback.answer()
         return
 
     if remote_status == "succeeded":
-        await confirm_payment(session, callback.message.bot, pending_payment, paid_at=now)
+        await confirm_payment(
+            session, callback.message.bot, pending_payment, paid_at=now
+        )
         await session.commit()
         await callback.answer("Оплата подтверждена")
         return
@@ -600,9 +659,7 @@ async def payment_refresh_handler(
     if remote_status in ("canceled", "expired"):
         pending_payment.status = PaymentStatus.FAILED
         await session.commit()
-        await callback.message.answer(
-            "Этот счет уже неактивен. Создаю новый платеж..."
-        )
+        await callback.message.answer("Этот счет уже неактивен. Создаю новый платеж...")
         await _send_personal_payment_link(session, callback.from_user, callback.message)
         await callback.answer()
         return
@@ -612,24 +669,26 @@ async def payment_refresh_handler(
     if remote_status == "pending" and url:
         keyboard = types.InlineKeyboardMarkup(
             inline_keyboard=[
-                [types.InlineKeyboardButton(text="🔗 Оплатить", url=url)],
+                [types.InlineKeyboardButton(text="💳 Перейти к оплате", url=url)],
                 [
                     types.InlineKeyboardButton(
-                        text="✅ Я уже оплатила, проверить",
+                        text="🔄 Проверить оплату",
                         callback_data="payment:refresh",
                     )
                 ],
             ]
         )
         await callback.message.answer(
-            "Оплата еще не подтверждена банком. Если уже оплатили, нажмите проверку еще раз через 30-60 секунд.",
+            "⏳ Оплата пока не подтверждена банком.\n"
+            "Если вы уже оплатили, повторите проверку через 30–60 секунд.",
             reply_markup=keyboard,
         )
         await callback.answer()
         return
 
     await callback.message.answer(
-        "Статус платежа пока не распознан. Нажмите «💳 Моя оплата» для повторной проверки."
+        "Статус платежа пока не распознан. Нажмите «💳 Моя оплата» "
+        "для повторной проверки."
     )
     await callback.answer()
 
@@ -707,9 +766,7 @@ async def access_handler(message: types.Message, session: AsyncSession) -> None:
 
 
 @router.message(lambda m: m.text == "⏳ Оплачу позже")
-async def pay_later_menu_handler(
-    message: types.Message, session: AsyncSession
-) -> None:
+async def pay_later_menu_handler(message: types.Message, session: AsyncSession) -> None:
     now = datetime.now(timezone.utc)
     user = await get_or_create_user(
         session=session,
@@ -732,9 +789,7 @@ async def pay_later_menu_handler(
 
 
 @router.message(lambda m: m.text == "📅 Расписание")
-async def schedule_handler(
-    message: types.Message, session: AsyncSession
-) -> None:
+async def schedule_handler(message: types.Message, session: AsyncSession) -> None:
     now = datetime.now(timezone.utc)
     if settings.free_flows_enabled:
         flow = await flow_repo.get_active_free_flow(session, now)
@@ -763,19 +818,17 @@ async def schedule_handler(
     try:
         text = template.format(
             kind=kind,
-            start=flow.start_at.date(),
-            end=flow.end_at.date(),
+            start=format_local_date(flow.start_at),
+            end=format_local_date(flow.end_at),
             sales_status=sales_status,
         )
         await message.answer(text)
     except (KeyError, ValueError):
-        await message.answer(
-            "⚠️ Ошибка шаблона расписания. Проверьте текст в админке."
-        )
+        await message.answer("⚠️ Ошибка шаблона расписания. Проверьте текст в админке.")
         await message.answer(
             f"{kind} поток:\n"
-            f"Старт: {flow.start_at.date()}\n"
-            f"Окончание: {flow.end_at.date()}\n"
+            f"Старт: {format_local_date(flow.start_at)}\n"
+            f"Окончание: {format_local_date(flow.end_at)}\n"
             f"{sales_status}"
         )
 
@@ -800,14 +853,16 @@ async def promo_code_handler(
     await session.commit()
     await state.set_state(PromoCodeState.waiting_code)
     await state.update_data(user_id=user.id)
-    await message.answer("Введите промокод.")
+    await message.answer(
+        "Введите промокод одним сообщением.", reply_markup=_cancel_input_kb()
+    )
 
 
 @router.message(PromoCodeState.waiting_code)
 async def promo_code_apply_handler(
     message: types.Message, session: AsyncSession, state: FSMContext
 ) -> None:
-    code = message.text.strip().upper()
+    code = (message.text or "").strip().upper()
     if not code:
         await message.answer("Введите промокод.")
         return
@@ -837,11 +892,15 @@ async def promo_code_apply_handler(
         return
 
     latest = await promo_repo.get_latest_user_promo(session, user_id)
-    if latest:
-        await message.answer("Предыдущий промокод будет заменён новым.")
-
-    await promo_repo.add_user_promo(session, user_id, code)
+    applied = await promo_repo.add_user_promo(session, user_id, code)
+    if not applied:
+        await session.rollback()
+        await state.clear()
+        await message.answer("Лимит промокода исчерпан или он больше не активен.")
+        return
     await session.commit()
     await state.clear()
-    await message.answer("✅ Промокод применен. Проверяю персональную стоимость...")
+    if latest:
+        await message.answer("Предыдущий промокод заменён новым.")
+    await message.answer("✅ Промокод применён. Проверяю персональную стоимость…")
     await _send_personal_payment_link(session, message.from_user, message)

@@ -4,16 +4,12 @@ import logging
 from datetime import datetime, timezone
 
 from aiogram import Bot, types
-from dotenv import load_dotenv
-from sqlalchemy import distinct, select
-
-load_dotenv()
+from sqlalchemy import select
 
 from bot.access_control.service import grant_access
 from bot.db.models import Membership, MembershipStatus, User
 from bot.db.session import AsyncSessionLocal
 from config import settings
-
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("recover_mass_access")

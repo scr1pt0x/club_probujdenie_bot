@@ -5,9 +5,9 @@ Revises: 0003_app_settings
 Create Date: 2026-01-31
 
 """
-from alembic import op
-import sqlalchemy as sa
 
+import sqlalchemy as sa
+from alembic import op
 
 revision = "0004_promo_codes"
 down_revision = "0003_app_settings"

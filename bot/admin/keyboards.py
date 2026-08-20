@@ -40,7 +40,11 @@ def template_card_kb(key: str) -> InlineKeyboardMarkup:
 
 def flows_menu_kb(show_create_paid: bool) -> InlineKeyboardMarkup:
     rows = [
-        [InlineKeyboardButton(text="✏️ Изменить даты", callback_data="admin:flows:edit")],
+        [
+            InlineKeyboardButton(
+                text="✏️ Изменить даты", callback_data="admin:flows:edit"
+            )
+        ],
     ]
     if show_create_paid:
         rows.append(
@@ -58,8 +62,12 @@ def flows_menu_kb(show_create_paid: bool) -> InlineKeyboardMarkup:
 def flows_edit_select_kb() -> InlineKeyboardMarkup:
     rows = [
         [
-            InlineKeyboardButton(text="Текущий", callback_data="admin:flows:edit:current"),
-            InlineKeyboardButton(text="Следующий", callback_data="admin:flows:edit:next"),
+            InlineKeyboardButton(
+                text="Текущий", callback_data="admin:flows:edit:current"
+            ),
+            InlineKeyboardButton(
+                text="Следующий", callback_data="admin:flows:edit:next"
+            ),
         ],
     ]
     rows.extend(back_menu_kb("admin:flows").inline_keyboard)
@@ -77,7 +85,9 @@ def prices_menu_kb() -> InlineKeyboardMarkup:
             ),
         ],
         [
-            InlineKeyboardButton(text="✏️ Grace", callback_data="admin:prices:edit:grace"),
+            InlineKeyboardButton(
+                text="✏️ Grace", callback_data="admin:prices:edit:grace"
+            ),
             InlineKeyboardButton(
                 text="✏️ Оплачу позже", callback_data="admin:prices:edit:pay_later"
             ),
@@ -109,7 +119,7 @@ def mailings_menu_kb(enabled: bool) -> InlineKeyboardMarkup:
             InlineKeyboardButton(
                 text="💳 Не оплатившим",
                 callback_data="admin:mailings:custom:current_unpaid",
-            )
+            ),
         ],
         [
             InlineKeyboardButton(
@@ -158,9 +168,21 @@ def user_card_kb(user_id: int) -> InlineKeyboardMarkup:
 
 def promos_menu_kb() -> InlineKeyboardMarkup:
     rows = [
-        [InlineKeyboardButton(text="➕ Создать промокод", callback_data="admin:promos:create")],
-        [InlineKeyboardButton(text="📋 Список промокодов", callback_data="admin:promos:list")],
-        [InlineKeyboardButton(text="🧼 Отключить промокод", callback_data="admin:promos:disable")],
+        [
+            InlineKeyboardButton(
+                text="➕ Создать промокод", callback_data="admin:promos:create"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="📋 Список промокодов", callback_data="admin:promos:list"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="🧼 Отключить промокод", callback_data="admin:promos:disable"
+            )
+        ],
     ]
     rows.extend(back_menu_kb("admin:menu").inline_keyboard)
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -169,10 +191,16 @@ def promos_menu_kb() -> InlineKeyboardMarkup:
 def promo_kind_kb() -> InlineKeyboardMarkup:
     rows = [
         [
-            InlineKeyboardButton(text="% Процент", callback_data="admin:promos:kind:percent"),
+            InlineKeyboardButton(
+                text="% Процент", callback_data="admin:promos:kind:percent"
+            ),
             InlineKeyboardButton(text="Фикс", callback_data="admin:promos:kind:fixed"),
         ],
-        [InlineKeyboardButton(text="Бесплатно", callback_data="admin:promos:kind:free")],
+        [
+            InlineKeyboardButton(
+                text="Бесплатно", callback_data="admin:promos:kind:free"
+            )
+        ],
     ]
     rows.extend(back_menu_kb("admin:promos").inline_keyboard)
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -208,11 +236,31 @@ def shop_menu_kb() -> InlineKeyboardMarkup:
 
 def shop_texts_kb() -> InlineKeyboardMarkup:
     rows = [
-        [InlineKeyboardButton(text="🛍 Заголовок", callback_data="admin:text:shop_title")],
-        [InlineKeyboardButton(text="🛍 Вступление", callback_data="admin:text:shop_intro_desc")],
-        [InlineKeyboardButton(text="🛍 Продление", callback_data="admin:text:shop_renewal_desc")],
-        [InlineKeyboardButton(text="🛍 Бесплатно", callback_data="admin:text:shop_free_desc")],
-        [InlineKeyboardButton(text="🛍 Заказ", callback_data="admin:text:shop_order_text")],
+        [
+            InlineKeyboardButton(
+                text="🛍 Заголовок", callback_data="admin:text:shop_title"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="🛍 Вступление", callback_data="admin:text:shop_intro_desc"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="🛍 Продление", callback_data="admin:text:shop_renewal_desc"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="🛍 Бесплатно", callback_data="admin:text:shop_free_desc"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="🛍 Заказ", callback_data="admin:text:shop_order_text"
+            )
+        ],
     ]
     rows.extend(back_menu_kb("admin:shop").inline_keyboard)
     return InlineKeyboardMarkup(inline_keyboard=rows)

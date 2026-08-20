@@ -1,24 +1,21 @@
 from __future__ import with_statement
 
+# ruff: noqa: E402 -- project root must be added before application imports.
 import asyncio
 import sys
 from logging.config import fileConfig
 from pathlib import Path
 
-from dotenv import load_dotenv
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
-load_dotenv()
 
 from alembic import context
 from sqlalchemy import pool
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
-from config import settings
-from bot.db.base import Base
 from bot.db import models  # noqa: F401
-
+from bot.db.base import Base
+from config import settings
 
 config = context.config
 fileConfig(config.config_file_name)

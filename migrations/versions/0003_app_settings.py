@@ -5,9 +5,9 @@ Revises: 0002_user_tg_id_bigint
 Create Date: 2026-01-31
 
 """
-from alembic import op
-import sqlalchemy as sa
 
+import sqlalchemy as sa
+from alembic import op
 
 revision = "0003_app_settings"
 down_revision = "0002_user_tg_id_bigint"

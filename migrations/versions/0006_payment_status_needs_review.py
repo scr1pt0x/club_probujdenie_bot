@@ -4,8 +4,8 @@ Revision ID: 0006_payment_status_needs_review
 Revises: 0005_payments_external_id_nullable
 Create Date: 2026-03-23
 """
-from alembic import op
 
+from alembic import op
 
 revision = "0006_payment_status_needs_review"
 down_revision = "0005_payments_external_id_nullable"

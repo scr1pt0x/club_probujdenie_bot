@@ -2,9 +2,9 @@ from datetime import datetime, timedelta, timezone
 
 from aiogram import Router, types
 from aiogram.filters import Command
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.access_control.service import grant_access, revoke_access
@@ -23,16 +23,22 @@ from bot.admin.keyboards import (
     user_card_kb,
     users_search_kb,
 )
-from bot.admin.templates import DEFAULT_TEMPLATES, TEMPLATE_LABELS
+from bot.admin.templates import DEFAULT_TEMPLATES
 from bot.db.models import Flow, Membership, MembershipStatus
 from bot.repositories import flows as flow_repo
 from bot.repositories import memberships as membership_repo
-from bot.repositories.audit_log import add_audit_log, list_audit_logs
+from bot.repositories import promos as promo_repo
 from bot.repositories.app_settings import get_setting, set_setting
+from bot.repositories.audit_log import add_audit_log, list_audit_logs
 from bot.repositories.message_templates import get_template_by_key, upsert_template
 from bot.repositories.promos import delete_user_promos
-from bot.repositories import promos as promo_repo
-from bot.repositories.users import get_or_create_user, get_user_by_id, get_user_by_tg_id, get_user_by_username
+from bot.repositories.users import (
+    get_or_create_user,
+    get_user_by_id,
+    get_user_by_tg_id,
+    get_user_by_username,
+)
+from bot.services.flows import sales_window_for_start
 from bot.services.mailings import send_custom_broadcast
 from bot.services.memberships import compute_grace_end
 from bot.services.settings import (
@@ -42,15 +48,14 @@ from bot.services.settings import (
     get_shop_prices,
 )
 from bot.services.texts import get_text
-from bot.services.flows import sales_window_for_start
+from bot.ui.messages import split_message
 from config import settings
-
 
 router = Router()
 
 
 def _next_paid_start_after_flow_end(flow_end_at: datetime) -> datetime:
-    """00:00 UTC в календарный день после дня окончания потока (корректно при любом времени end_at)."""
+    """Вернуть 00:00 UTC в календарный день после окончания потока."""
     end_day = flow_end_at.astimezone(timezone.utc).date()
     next_day = end_day + timedelta(days=1)
     return datetime(next_day.year, next_day.month, next_day.day, tzinfo=timezone.utc)
@@ -93,17 +98,28 @@ class ShopPriceEditState(StatesGroup):
 class CustomMailingState(StatesGroup):
     waiting_text = State()
 
+
 def _admin_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="📅 Потоки", callback_data="admin:flows")],
-            [InlineKeyboardButton(text="Цены и grace-период", callback_data="admin:prices")],
-            [InlineKeyboardButton(text="📝 Тексты", callback_data="admin:texts")],
-            [InlineKeyboardButton(text="Промо / бесплатные потоки", callback_data="admin:promos")],
-            [InlineKeyboardButton(text="🛍 Витрина", callback_data="admin:shop")],
-            [InlineKeyboardButton(text="Пользователи", callback_data="admin:users")],
-            [InlineKeyboardButton(text="📣 Рассылки", callback_data="admin:mailings")],
-            [InlineKeyboardButton(text="Лог действий", callback_data="admin:audit")],
+            [
+                InlineKeyboardButton(text="📅 Потоки", callback_data="admin:flows"),
+                InlineKeyboardButton(text="💳 Цены", callback_data="admin:prices"),
+            ],
+            [
+                InlineKeyboardButton(text="🛍 Витрина", callback_data="admin:shop"),
+                InlineKeyboardButton(text="🏷 Промокоды", callback_data="admin:promos"),
+            ],
+            [
+                InlineKeyboardButton(text="👥 Участницы", callback_data="admin:users"),
+                InlineKeyboardButton(
+                    text="📣 Рассылки", callback_data="admin:mailings"
+                ),
+            ],
+            [
+                InlineKeyboardButton(text="📝 Тексты", callback_data="admin:texts"),
+                InlineKeyboardButton(text="🧾 Журнал", callback_data="admin:audit"),
+            ],
         ]
     )
 
@@ -119,7 +135,10 @@ async def admin_menu(message: types.Message, session: AsyncSession) -> None:
         payload={"tg_id": message.from_user.id},
     )
     await session.commit()
-    await message.answer("Админ-панель:", reply_markup=_admin_keyboard())
+    await message.answer(
+        "⚙️ Управление клубом\n\nВыберите раздел:",
+        reply_markup=_admin_keyboard(),
+    )
 
 
 async def _get_template_text(session: AsyncSession, key: str) -> str:
@@ -133,10 +152,10 @@ async def _show_template_card(
     callback: types.CallbackQuery, session: AsyncSession, key: str
 ) -> None:
     text = await _get_template_text(session, key)
-    await callback.message.answer(
-        f"Ключ: {key}\n\nТекст:\n{text}",
-        reply_markup=template_card_kb(key),
-    )
+    chunks = split_message(f"Ключ: {key}\n\nТекст:\n{text}")
+    for chunk in chunks[:-1]:
+        await callback.message.answer(chunk)
+    await callback.message.answer(chunks[-1], reply_markup=template_card_kb(key))
     await callback.answer()
 
 
@@ -177,7 +196,7 @@ async def _get_next_flow(session: AsyncSession, now: datetime):
 
 
 async def _resolve_next_paid_start_at(session: AsyncSession) -> datetime | None:
-    """Дата старта следующего платного потока: после бесплатного (если он есть), иначе после последнего платного."""
+    """Рассчитать старт платного потока после последнего подходящего потока."""
     now = datetime.now(timezone.utc)
     if settings.free_flows_enabled:
         free_flow = await flow_repo.get_active_free_flow(session, now)
@@ -281,9 +300,7 @@ def _mailings_custom_audience_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-async def _show_users_search(
-    callback: types.CallbackQuery, state: FSMContext
-) -> None:
+async def _show_users_search(callback: types.CallbackQuery, state: FSMContext) -> None:
     await state.set_state(UserSearchState.waiting_query)
     await callback.message.answer(
         "👤 Управление пользователями\n\n"
@@ -326,9 +343,7 @@ async def _show_shop_screen_message(
     await message.answer(text, reply_markup=shop_menu_kb())
 
 
-async def _send_shop_preview(
-    message: types.Message, session: AsyncSession
-) -> None:
+async def _send_shop_preview(message: types.Message, session: AsyncSession) -> None:
     prices = await get_shop_prices(session)
     free_label = await get_shop_free_label(session)
     title = await get_text(session, "shop_title")
@@ -380,9 +395,7 @@ def _format_audit_log(entry) -> str:
     if target_tg_id:
         lines.append(f"🎯 Кому: tg_id {target_tg_id}")
     details = {
-        k: v
-        for k, v in payload.items()
-        if k not in {"actor_tg_id", "action", "tg_id"}
+        k: v for k, v in payload.items() if k not in {"actor_tg_id", "action", "tg_id"}
     }
     if details:
         lines.append("ℹ️ Детали:")
@@ -391,11 +404,13 @@ def _format_audit_log(entry) -> str:
     lines.append("--------------------------------")
     return "\n".join(lines)
 
+
 async def _get_current_or_next_flow(session: AsyncSession, now: datetime):
     flow = await _get_current_flow(session, now)
     if flow is None:
         flow = await _get_next_flow(session, now)
     return flow
+
 
 @router.callback_query(lambda c: c.data and c.data.startswith("admin:"))
 async def admin_section(
@@ -406,6 +421,18 @@ async def admin_section(
         return
 
     section = callback.data.split(":", 1)[1]
+    if section in {
+        "menu",
+        "flows",
+        "prices",
+        "texts",
+        "promos",
+        "shop",
+        "users",
+        "mailings",
+        "audit",
+    }:
+        await state.clear()
     text: str | None = None
     if section == "flows":
         await _show_flows_screen(callback, session)
@@ -440,13 +467,19 @@ async def admin_section(
             await callback.answer()
             return
         blocks = [_format_audit_log(entry) for entry in logs]
+        chunks = split_message("\n".join(blocks))
+        for chunk in chunks[:-1]:
+            await callback.message.answer(chunk)
         await callback.message.answer(
-            "\n".join(blocks), reply_markup=back_menu_kb("admin:menu")
+            chunks[-1], reply_markup=back_menu_kb("admin:menu")
         )
         await callback.answer()
         return
     elif section == "menu":
-        await callback.message.answer("Админ-панель:", reply_markup=_admin_keyboard())
+        await callback.message.answer(
+            "⚙️ Управление клубом\n\nВыберите раздел:",
+            reply_markup=_admin_keyboard(),
+        )
         await callback.answer()
         return
     elif section.startswith("prices:"):
@@ -609,7 +642,9 @@ async def admin_section(
         await session.commit()
 
         now = datetime.now(timezone.utc)
-        membership = await membership_repo.get_latest_membership(session, user_id=user.id)
+        membership = await membership_repo.get_latest_membership(
+            session, user_id=user.id
+        )
         effective = await get_effective_settings(session)
 
         if action == "grant":
@@ -761,8 +796,9 @@ async def admin_section(
             start_at = await _resolve_next_paid_start_at(session)
             if start_at is None:
                 await callback.message.answer(
-                    "Не удалось вычислить старт следующего платного потока: в базе нет платных потоков. "
-                    "Задайте PAID_FLOW_START и перезапустите бота (сидер) или добавьте поток вручную."
+                    "Не удалось вычислить старт следующего платного потока: "
+                    "в базе нет платных потоков. Задайте PAID_FLOW_START и "
+                    "перезапустите бота (сидер) или добавьте поток вручную."
                 )
                 await callback.answer()
                 return
@@ -843,7 +879,7 @@ async def flow_edit_start_handler(
     if message.from_user.id not in settings.admin_tg_ids:
         return
     try:
-        start_at = datetime.strptime(message.text.strip(), "%Y-%m-%d").replace(
+        start_at = datetime.strptime((message.text or "").strip(), "%Y-%m-%d").replace(
             tzinfo=timezone.utc
         )
     except ValueError:
@@ -872,7 +908,7 @@ async def flow_edit_end_handler(
     if message.from_user.id not in settings.admin_tg_ids:
         return
     try:
-        end_at = datetime.strptime(message.text.strip(), "%Y-%m-%d").replace(
+        end_at = datetime.strptime((message.text or "").strip(), "%Y-%m-%d").replace(
             tzinfo=timezone.utc
         )
     except ValueError:
@@ -924,7 +960,7 @@ async def price_edit_handler(
         return
 
     try:
-        value = int(message.text.strip())
+        value = int((message.text or "").strip())
     except ValueError:
         await message.answer("Введите целое число.")
         return
@@ -959,9 +995,9 @@ async def user_search_handler(
 ) -> None:
     if message.from_user.id not in settings.admin_tg_ids:
         return
-    query = message.text.strip()
+    query = (message.text or "").strip()
     if not query:
-        await message.answer("Введите @username или числовой tg_id.")
+        await message.answer("Введите @username или числовой Telegram ID.")
         return
 
     user = None
@@ -988,8 +1024,7 @@ async def user_search_handler(
     lines = [
         f"tg_id: {user.tg_id}",
         f"username: @{user.username}" if user.username else "username: —",
-        f"имя: {user.first_name or ''} {user.last_name or ''}".strip()
-        or "имя: —",
+        f"имя: {user.first_name or ''} {user.last_name or ''}".strip() or "имя: —",
         f"доступ сейчас: {'да' if has_access else 'нет'}",
     ]
 
@@ -1020,7 +1055,7 @@ async def promo_create_code_handler(
 ) -> None:
     if message.from_user.id not in settings.admin_tg_ids:
         return
-    code = message.text.strip().upper()
+    code = (message.text or "").strip().upper()
     if not code:
         await message.answer("Введите код промокода.")
         return
@@ -1052,7 +1087,7 @@ async def promo_create_value_handler(
     if message.from_user.id not in settings.admin_tg_ids:
         return
     try:
-        value = int(message.text.strip())
+        value = int((message.text or "").strip())
     except ValueError:
         await message.answer("Введите число.")
         return
@@ -1073,7 +1108,7 @@ async def promo_create_limit_handler(
     if message.from_user.id not in settings.admin_tg_ids:
         return
     try:
-        value = int(message.text.strip())
+        value = int((message.text or "").strip())
     except ValueError:
         await message.answer("Введите число.")
         return
@@ -1095,7 +1130,7 @@ async def promo_create_starts_handler(
 ) -> None:
     if message.from_user.id not in settings.admin_tg_ids:
         return
-    raw = message.text.strip()
+    raw = (message.text or "").strip()
     starts_at = None
     if raw and raw not in ("-", "skip"):
         try:
@@ -1117,7 +1152,7 @@ async def promo_create_ends_handler(
 ) -> None:
     if message.from_user.id not in settings.admin_tg_ids:
         return
-    raw = message.text.strip()
+    raw = (message.text or "").strip()
     ends_at = None
     if raw and raw not in ("-", "skip"):
         try:
@@ -1160,7 +1195,7 @@ async def promo_disable_handler(
 ) -> None:
     if message.from_user.id not in settings.admin_tg_ids:
         return
-    code = message.text.strip().upper()
+    code = (message.text or "").strip().upper()
     if not code:
         await message.answer("Введите код промокода.")
         return
@@ -1215,14 +1250,14 @@ async def shop_price_edit_handler(
         await message.answer("Настройка не найдена.")
         return
     if key == "free_label":
-        value = message.text.strip()
+        value = (message.text or "").strip()
         if not value:
             await message.answer("Введите непустое значение.")
             return
         await set_setting(session, "shop_free_label", value)
     else:
         try:
-            value = int(message.text.strip())
+            value = int((message.text or "").strip())
         except ValueError:
             await message.answer("Введите целое число.")
             return
@@ -1254,12 +1289,16 @@ async def template_text_handler(
         await message.answer("Шаблон не найден.")
         return
 
-    await upsert_template(session, key, message.text)
+    text = message.text or ""
+    if not text.strip():
+        await message.answer("Отправьте непустой текст шаблона.")
+        return
+    await upsert_template(session, key, text)
     await session.commit()
     await state.clear()
 
     await message.answer("✅ Сохранено.")
-    await message.answer(
-        f"Ключ: {key}\n\nТекст:\n{message.text}",
-        reply_markup=template_card_kb(key),
-    )
+    chunks = split_message(f"Ключ: {key}\n\nТекст:\n{text}")
+    for chunk in chunks[:-1]:
+        await message.answer(chunk)
+    await message.answer(chunks[-1], reply_markup=template_card_kb(key))

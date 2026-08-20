@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.access_control.service import revoke_access
 from bot.db.models import Flow, Membership, MembershipStatus, Payment, PaymentStatus
+from bot.payments.adapter import PaymentAdapter
 from bot.repositories import flows as flow_repo
 from bot.repositories import memberships as membership_repo
 from bot.repositories import payments as payment_repo
@@ -20,10 +21,21 @@ from bot.services.mailings import (
 from bot.services.payments import confirm_payment, notify_payment_status
 from bot.services.settings import get_mailings_enabled
 from bot.services.texts import get_text
-from bot.payments.adapter import PaymentAdapter
 from config import settings
 
 logger = logging.getLogger(__name__)
+
+
+def _pending_payment_deadline(payment: Payment) -> datetime:
+    if payment.expires_at is not None:
+        return payment.expires_at
+    # Legacy payments did not have expires_at. Provider status is checked before
+    # this fallback is used, so a succeeded legacy payment is still confirmed.
+    return payment.created_at + timedelta(hours=24)
+
+
+def _expiration_notice_is_timely(payment: Payment, now: datetime) -> bool:
+    return _pending_payment_deadline(payment) >= now - timedelta(days=1)
 
 
 def _is_revoke_jobs_enabled() -> bool:
@@ -45,13 +57,17 @@ def _is_mass_revoke_blocked(job_name: str, candidates_count: int) -> bool:
 
 
 async def _has_other_active_membership(
-    session: AsyncSession, user_id: int, exclude_membership_id: int
+    session: AsyncSession,
+    user_id: int,
+    exclude_membership_id: int,
+    now: datetime,
 ) -> bool:
     result = await session.execute(
         select(Membership.id)
         .where(Membership.user_id == user_id)
         .where(Membership.status == MembershipStatus.ACTIVE)
         .where(Membership.id != exclude_membership_id)
+        .where(Membership.grace_end_at >= now)
         .limit(1)
     )
     return result.scalar_one_or_none() is not None
@@ -90,23 +106,27 @@ async def expire_memberships(session: AsyncSession, bot: Bot) -> None:
         return
     now = datetime.now(timezone.utc)
     memberships = await membership_repo.list_memberships_to_expire(session, now)
-    if _is_mass_revoke_blocked("expire_memberships", len(memberships)):
-        return
-    revoked_user_ids: set[int] = set()
+
+    revoke_user_ids: set[int] = set()
     for membership in memberships:
         if await _has_any_future_paid_payment(session, membership.user_id, now):
             continue
-        membership.status = MembershipStatus.EXPIRED
-        user = await user_repo.get_user_by_id(session, membership.user_id)
-        if (
-            user
-            and user.id not in revoked_user_ids
-            and not await _has_other_active_membership(
-                session, membership.user_id, membership.id
-            )
+        if await _has_other_active_membership(
+            session, membership.user_id, membership.id, now
         ):
+            continue
+        revoke_user_ids.add(membership.user_id)
+
+    if _is_mass_revoke_blocked("expire_memberships", len(revoke_user_ids)):
+        return
+
+    for membership in memberships:
+        membership.status = MembershipStatus.EXPIRED
+
+    for user_id in revoke_user_ids:
+        user = await user_repo.get_user_by_id(session, user_id)
+        if user:
             await revoke_access(bot, user.tg_id)
-            revoked_user_ids.add(user.id)
     await session.commit()
 
 
@@ -133,7 +153,7 @@ async def enforce_pay_later_deadlines(session: AsyncSession, bot: Bot) -> None:
             user
             and user.id not in revoked_user_ids
             and not await _has_other_active_membership(
-                session, membership.user_id, membership.id
+                session, membership.user_id, membership.id, now
             )
         ):
             try:
@@ -141,7 +161,10 @@ async def enforce_pay_later_deadlines(session: AsyncSession, bot: Bot) -> None:
             except Exception:
                 logger.exception(
                     "Failed to notify user on pay-later expiry",
-                    extra={"user_id": membership.user_id, "membership_id": membership.id},
+                    extra={
+                        "user_id": membership.user_id,
+                        "membership_id": membership.id,
+                    },
                 )
             await revoke_access(bot, user.tg_id)
             revoked_user_ids.add(user.id)
@@ -185,14 +208,14 @@ async def remove_non_renewed_on_flow_start(
             # for target flow has not been created yet.
             continue
 
-        # Критично: если не было "оплатить позже" и оплаты, удаляем в первый день потока.
+        # Без отсрочки и оплаты удаляем в первый день нового потока.
         membership.status = MembershipStatus.EXPIRED
         user = await user_repo.get_user_by_id(session, membership.user_id)
         if (
             user
             and user.id not in revoked_user_ids
             and not await _has_other_active_membership(
-                session, membership.user_id, membership.id
+                session, membership.user_id, membership.id, now_utc
             )
         ):
             await revoke_access(bot, user.tg_id)
@@ -200,9 +223,7 @@ async def remove_non_renewed_on_flow_start(
     await session.commit()
 
 
-async def remove_non_renewed_on_paid_flows(
-    session: AsyncSession, bot: Bot
-) -> None:
+async def remove_non_renewed_on_paid_flows(session: AsyncSession, bot: Bot) -> None:
     flows = await flow_repo.list_flows(session)
     for flow in flows:
         if flow.is_free:
@@ -214,7 +235,7 @@ async def check_pending_payments(
     session: AsyncSession, bot: Bot, adapter: PaymentAdapter
 ) -> None:
     now = datetime.now(timezone.utc)
-    pending = await payment_repo.list_pending_payments(session, now)
+    pending = await payment_repo.list_pending_payments(session)
     for payment in pending:
         try:
             status = await adapter.get_payment_status(payment.external_id)
@@ -231,13 +252,24 @@ async def check_pending_payments(
                 )
             elif status == PaymentStatus.EXPIRED:
                 payment.status = PaymentStatus.EXPIRED
-                await notify_payment_status(
-                    session,
-                    bot,
-                    payment.user_id,
-                    "payment_expired",
-                    dedupe_key=f"payment:{payment.id}:payment_expired",
-                )
+                if _expiration_notice_is_timely(payment, now):
+                    await notify_payment_status(
+                        session,
+                        bot,
+                        payment.user_id,
+                        "payment_expired",
+                        dedupe_key=f"payment:{payment.id}:payment_expired",
+                    )
+            elif now >= _pending_payment_deadline(payment):
+                payment.status = PaymentStatus.EXPIRED
+                if _expiration_notice_is_timely(payment, now):
+                    await notify_payment_status(
+                        session,
+                        bot,
+                        payment.user_id,
+                        "payment_expired",
+                        dedupe_key=f"payment:{payment.id}:payment_expired",
+                    )
             else:
                 continue
 
