@@ -61,6 +61,16 @@ router = Router()
 logger = logging.getLogger(__name__)
 
 
+def _extend_membership_seven_days(membership, now, grace_days):
+    membership.status = MembershipStatus.ACTIVE
+    membership.access_end_at = max(membership.access_end_at, now) + timedelta(days=7)
+    membership.grace_end_at = compute_grace_end(membership.access_end_at, grace_days)
+    if membership.pay_later_deadline_at:
+        membership.pay_later_deadline_at = max(
+            membership.pay_later_deadline_at, membership.access_end_at
+        )
+
+
 def _next_paid_start_after_flow_end(flow_end_at: datetime) -> datetime:
     """Вернуть 00:00 UTC в календарный день после окончания потока."""
     end_day = flow_end_at.astimezone(timezone.utc).date()
@@ -886,14 +896,7 @@ async def admin_section(
                 await callback.message.answer("Нет участия для продления.")
                 await callback.answer()
                 return
-            membership.access_end_at = membership.access_end_at + timedelta(days=7)
-            membership.grace_end_at = compute_grace_end(
-                membership.access_end_at, effective.grace_days
-            )
-            if membership.pay_later_deadline_at:
-                membership.pay_later_deadline_at = max(
-                    membership.pay_later_deadline_at, membership.access_end_at
-                )
+            _extend_membership_seven_days(membership, now, effective.grace_days)
             await add_audit_log(
                 session,
                 action="admin_user_action",
@@ -905,7 +908,13 @@ async def admin_section(
                 actor_user_id=admin_user.id,
             )
             await session.commit()
-            await callback.message.answer("✅ Продлено на 7 дней.")
+            access_result = await grant_access(callback.message.bot, user.tg_id)
+            await callback.message.answer(
+                "✅ Продлено на 7 дней. Ссылки доступны участнице в «Мой доступ»."
+                if access_result.successful
+                else "✅ Срок продлён. ⚠️ Telegram не подтвердил доступ в оба чата; "
+                "проверьте права бота и повторите выдачу доступа."
+            )
             await callback.answer()
             return
 

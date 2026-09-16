@@ -512,3 +512,30 @@ def test_all_scheduled_end_reminder_dates_are_reachable(monkeypatch, is_free, da
             assert f"end_minus_{days}" in send.await_args.kwargs["mailing_key"]
 
     asyncio.run(database_scenario(scenario))
+
+
+@pytest.mark.parametrize("exempt", [True, False])
+def test_self_service_links_require_current_entitlement(monkeypatch, exempt):
+    from bot.handlers import membership as handler
+
+    async def scenario(sessions, ids, now):
+        async with sessions() as session:
+            (await session.get(User, ids.user)).access_exempt = exempt
+            await session.commit()
+            grant = AsyncMock(
+                return_value=AccessChangeResult(
+                    True, True, "https://t.me/+QA1", "https://t.me/+QA2"
+                )
+            )
+            monkeypatch.setattr(handler, "grant_access", grant)
+            monkeypatch.setattr(handler, "edit_screen", AsyncMock())
+            cb = SimpleNamespace(
+                from_user=SimpleNamespace(id=900000001),
+                bot=object(),
+                message=object(),
+                answer=AsyncMock(),
+            )
+            await handler.access_links_handler(cb, session)
+            assert grant.await_count == int(exempt)
+
+    asyncio.run(database_scenario(scenario))

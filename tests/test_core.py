@@ -7,6 +7,7 @@ import pytest
 
 from bot.access_control import service as access_service
 from bot.admin.keyboards import user_card_kb
+from bot.admin.router import _extend_membership_seven_days
 from bot.admin.templates import DEFAULT_TEMPLATES, TEMPLATE_LABELS
 from bot.db.models import MembershipStatus
 from bot.handlers.menu import _pay_later_screen, _shop_menu_kb
@@ -33,6 +34,21 @@ def test_price_and_date_formatters_are_user_friendly():
     assert format_flow_period(NOW, NOW + timedelta(days=35)) == (
         "20.08.2026 — 24.09.2026"
     )
+
+
+@pytest.mark.parametrize(
+    "status,old_end",
+    [("active", NOW + timedelta(days=3)), ("expired", NOW - timedelta(days=30))],
+)
+def test_manual_extension_reactivates_without_backdating(status, old_end):
+    member = SimpleNamespace(
+        status=status, access_end_at=old_end, pay_later_deadline_at=old_end
+    )
+    _extend_membership_seven_days(member, NOW, 1)
+    assert member.status == "active"
+    assert member.access_end_at == max(old_end, NOW) + timedelta(days=7)
+    assert member.grace_end_at == member.access_end_at + timedelta(days=1)
+    assert member.pay_later_deadline_at == member.access_end_at
 
 
 def test_main_menu_exposes_status_and_keeps_primary_actions_first():
