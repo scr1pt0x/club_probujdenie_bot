@@ -42,7 +42,10 @@ def test_price_and_date_formatters_are_user_friendly():
 )
 def test_manual_extension_reactivates_without_backdating(status, old_end):
     member = SimpleNamespace(
-        status=status, access_end_at=old_end, pay_later_deadline_at=old_end
+        status=status,
+        access_end_at=old_end,
+        pay_later_deadline_at=old_end,
+        grace_end_at=old_end + timedelta(days=1),
     )
     _extend_membership_seven_days(member, NOW, 1)
     assert member.status == "active"
@@ -197,7 +200,9 @@ def test_confirmed_payment_locks_user_before_granting_access(monkeypatch):
 
     async def lock_user(_session, user_id):
         calls.append(("lock", user_id))
-        return SimpleNamespace(id=user_id, tg_id=42)
+        return SimpleNamespace(
+            id=user_id, tg_id=42, access_exempt=False, access_suspended=False
+        )
 
     async def grant(_bot, tg_id):
         calls.append(("grant", tg_id))

@@ -5,7 +5,7 @@ from aiogram import Router, types
 from aiogram.exceptions import TelegramAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bot.repositories.users import get_user_by_tg_id
+from bot.repositories.users import lock_user_by_tg_id
 from bot.services.entitlements import has_valid_access
 from config import settings
 
@@ -24,7 +24,8 @@ async def approve_join_request(
     if join_request.chat.id not in allowed_chat_ids:
         return
 
-    user = await get_user_by_tg_id(session, join_request.from_user.id)
+    # Hold the same user lock as manual restrictions until Telegram answers.
+    user = await lock_user_by_tg_id(session, join_request.from_user.id)
     if user is None:
         try:
             await join_request.bot.decline_chat_join_request(

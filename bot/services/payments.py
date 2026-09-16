@@ -45,7 +45,7 @@ async def calculate_price_rub(
     active_membership = await membership_repo.get_active_membership(session, user_id)
     effective = await get_effective_settings(session)
     if active_membership and membership_service.is_within_grace(
-        active_membership, paid_at, effective.grace_days
+        active_membership, paid_at
     ):
         base_price = effective.renewal_price_rub
     else:
@@ -126,7 +126,7 @@ async def confirm_payment(
     # access. Whichever decision starts second must see the first one's commit.
     user = await user_repo.lock_user_by_id(session, payment.user_id)
     if payment.status == PaymentStatus.PAID:
-        if user:
+        if user and (user.access_exempt or not user.access_suspended):
             links = await grant_access(bot, user.tg_id)
             if notify_user:
                 await _notify_success_with_links_fallback(
@@ -194,7 +194,7 @@ async def confirm_payment(
     )
 
     links = None
-    if user:
+    if user and (user.access_exempt or not user.access_suspended):
         links = await grant_access(bot, user.tg_id)
         if notify_user:
             await _notify_success_with_links_fallback(

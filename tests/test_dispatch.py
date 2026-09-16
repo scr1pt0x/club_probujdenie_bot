@@ -18,6 +18,25 @@ def context():
     return FSMContext(MemoryStorage(), StorageKey(bot_id=123, chat_id=42, user_id=42))
 
 
+def test_non_admin_cannot_resolve_payments_or_resume_broadcasts(monkeypatch):
+    async def scenario():
+        monkeypatch.setattr(admin, "settings", SimpleNamespace(admin_tg_ids=[42]))
+        review = AsyncMock()
+        resume = AsyncMock()
+        monkeypatch.setattr(admin, "payment_reviews_screen", review)
+        monkeypatch.setattr(admin, "resume_custom_mailing", resume)
+        for data in ("admin:payments:resolve:1:1", "admin:mailings:resume:test"):
+            cb = SimpleNamespace(
+                from_user=SimpleNamespace(id=43), data=data, answer=AsyncMock()
+            )
+            await admin.admin_section(cb, object(), context())
+            cb.answer.assert_awaited_once()
+        review.assert_not_awaited()
+        resume.assert_not_awaited()
+
+    asyncio.run(scenario())
+
+
 def message(bot, **kwargs):
     return Message(
         message_id=7,

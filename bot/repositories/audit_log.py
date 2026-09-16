@@ -30,3 +30,26 @@ async def list_audit_logs(session: AsyncSession, limit: int = 50) -> list[AuditL
         select(AuditLog).order_by(AuditLog.created_at.desc()).limit(limit)
     )
     return list(result.scalars().all())
+
+
+async def get_action_payload(session, action: str, key: str) -> dict | None:
+    result = await session.execute(
+        select(AuditLog.payload)
+        .where(
+            AuditLog.action == action,
+            AuditLog.payload["key"].astext == key,
+        )
+        .order_by(AuditLog.id.desc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+async def recent_campaigns(session, limit=10):
+    result = await session.execute(
+        select(AuditLog)
+        .where(AuditLog.action == "custom_mailing_started")
+        .order_by(AuditLog.id.desc())
+        .limit(limit)
+    )
+    return list(result.scalars())

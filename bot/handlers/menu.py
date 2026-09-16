@@ -23,7 +23,12 @@ from bot.payments.yookassa_adapter import YooKassaAdapter
 from bot.repositories import flows as flow_repo
 from bot.repositories import memberships as membership_repo
 from bot.repositories import promos as promo_repo
-from bot.repositories.users import get_or_create_user, lock_user_by_id
+from bot.repositories.users import (
+    get_or_create_user,
+    lock_user_by_id,
+    lock_user_by_tg_id,
+)
+from bot.services.entitlements import has_valid_access
 from bot.services.flows import get_next_paid_flow
 from bot.services.memberships import (
     PayLaterEligibility,
@@ -171,7 +176,17 @@ async def _should_offer_renewal_checkout(
 async def _send_paid_access_links(
     session: AsyncSession, responder: ScreenResponder, tg_id: int
 ) -> None:
+    user = await lock_user_by_tg_id(session, tg_id)
+    if user is None or not await has_valid_access(
+        session, user.id, datetime.now(timezone.utc)
+    ):
+        await responder.answer(
+            "Доступ не активен. Обратитесь к администратору.",
+            reply_markup=back_home_kb(),
+        )
+        return
     links = await grant_access(responder.bot, tg_id)
+    await session.commit()
     kb = access_links_kb(links.channel_link, links.group_link)
     if kb is None:
         await responder.answer("Оплата уже подтверждена. Доступ активирован.")
@@ -201,9 +216,16 @@ async def _send_personal_payment_link(
     await session.execute(select(User.id).where(User.id == user.id).with_for_update())
 
     await session.refresh(user)
+    if user.access_suspended and not user.access_exempt:
+        await responder.answer(
+            "Доступ ограничен администратором. Сначала свяжитесь с ним; "
+            "новая оплата не снимет ограничение.",
+            reply_markup=back_home_kb(),
+        )
+        return
     if user.access_exempt:
-        await session.commit()
         links = await grant_access(responder.bot, user.tg_id)
+        await session.commit()
         await responder.answer(
             "🛡 У вас льготный доступ. Оплата не требуется.",
             reply_markup=access_links_kb(links.channel_link, links.group_link)
@@ -769,6 +791,15 @@ async def payment_refresh_handler(
         await callback.answer()
         return
 
+    if user.access_suspended and not user.access_exempt:
+        await responder.answer(
+            "Доступ ограничен администратором. Платёж не отменён; "
+            "для проверки и восстановления свяжитесь с администратором.",
+            reply_markup=back_home_kb(),
+        )
+        await callback.answer()
+        return
+
     pending_payment = (
         await session.execute(
             select(Payment)
@@ -977,7 +1008,13 @@ async def access_handler(message: types.Message, session: AsyncSession) -> None:
         )
         return
 
-    await lock_user_by_id(session, user.id)
+    user = await lock_user_by_id(session, user.id)
+    if user is None or (user.access_suspended and not user.access_exempt):
+        await responder.answer(
+            "Доступ ограничен администратором. Свяжитесь с ним для восстановления.",
+            reply_markup=back_home_kb(),
+        )
+        return
     existing = await membership_repo.get_membership_by_flow(
         session, user_id=user.id, flow_id=flow.id
     )
@@ -1011,8 +1048,8 @@ async def access_handler(message: types.Message, session: AsyncSession) -> None:
             grace_end_at=compute_grace_end(flow.end_at, effective.grace_days),
         )
         session.add(membership)
-    await session.commit()
     links = await grant_access(message.bot, message.from_user.id)
+    await session.commit()
     text = await get_text(session, "access_granted_free")
     kb = access_links_kb(links.channel_link, links.group_link)
     if kb is None:
@@ -1095,18 +1132,14 @@ def _pay_later_screen(
 
 async def _schedule_content(session: AsyncSession) -> str:
     now = datetime.now(timezone.utc)
-    if settings.free_flows_enabled:
+    current = await flow_repo.get_active_paid_flow(session, now)
+    enrollment = await flow_repo.get_paid_flow_in_sales_window(session, now)
+    upcoming = await get_next_paid_flow(session, now)
+    flow = enrollment or upcoming or current
+    if flow is None and settings.free_flows_enabled:
         flow = await flow_repo.get_active_free_flow(session, now)
         if flow is None:
-            flow = await flow_repo.get_active_paid_flow(session, now)
-        if flow is None:
             flow = await flow_repo.get_next_free_flow(session, now)
-        if flow is None:
-            flow = await get_next_paid_flow(session, now)
-    else:
-        flow = await flow_repo.get_active_paid_flow(session, now)
-        if flow is None:
-            flow = await get_next_paid_flow(session, now)
     if flow is None:
         return "🗓 Расписание\n\nНовый поток пока не запланирован."
 
@@ -1117,20 +1150,34 @@ async def _schedule_content(session: AsyncSession) -> str:
         else "Набор закрыт"
     )
     template = await get_text(session, "schedule_text")
+    # Legacy static dates must not override live scheduling indefinitely.
+    if not all(field in template for field in ("{start}", "{end}", "{sales_status}")):
+        template = "🗓 {kind} поток\n\nСтарт: {start}\nОкончание: {end}\n{sales_status}"
     try:
-        return template.format(
+        content = template.format(
             kind=kind,
             start=format_local_date(flow.start_at),
             end=format_local_date(flow.end_at),
             sales_status=sales_status,
         )
     except (KeyError, ValueError):
-        return (
+        content = (
             f"🗓 {kind} поток\n\n"
             f"Старт: {format_local_date(flow.start_at)}\n"
             f"Окончание: {format_local_date(flow.end_at)}\n"
             f"{sales_status}"
         )
+    content += (
+        f"\nОкно набора: {format_local_date(flow.sales_open_at)} — "
+        f"{format_local_date(flow.sales_close_at)}"
+    )
+    if current and current.id != flow.id:
+        content += (
+            "\n\nТекущий поток: "
+            f"{format_local_date(current.start_at)} — "
+            f"{format_local_date(current.end_at)}"
+        )
+    return content
 
 
 @router.message(lambda m: m.text == "📅 Расписание")

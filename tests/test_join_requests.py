@@ -34,7 +34,7 @@ def test_unknown_user_join_request_is_declined(monkeypatch):
         "settings",
         SimpleNamespace(primary_channel_id=-1001, secondary_discussion_id=-1002),
     )
-    monkeypatch.setattr(join_requests, "get_user_by_tg_id", no_user)
+    monkeypatch.setattr(join_requests, "lock_user_by_tg_id", no_user)
 
     asyncio.run(join_requests.approve_join_request(_request(bot), SimpleNamespace()))
 
@@ -55,7 +55,7 @@ def test_active_user_join_request_is_approved(monkeypatch):
         "settings",
         SimpleNamespace(primary_channel_id=-1001, secondary_discussion_id=-1002),
     )
-    monkeypatch.setattr(join_requests, "get_user_by_tg_id", get_user)
+    monkeypatch.setattr(join_requests, "lock_user_by_tg_id", get_user)
     monkeypatch.setattr(join_requests, "has_valid_access", has_access)
 
     asyncio.run(join_requests.approve_join_request(_request(bot), SimpleNamespace()))
@@ -77,7 +77,7 @@ def test_known_user_without_valid_access_is_declined(monkeypatch):
         "settings",
         SimpleNamespace(primary_channel_id=-1001, secondary_discussion_id=-1002),
     )
-    monkeypatch.setattr(join_requests, "get_user_by_tg_id", get_user)
+    monkeypatch.setattr(join_requests, "lock_user_by_tg_id", get_user)
     monkeypatch.setattr(join_requests, "has_valid_access", no_access)
 
     asyncio.run(join_requests.approve_join_request(_request(bot), SimpleNamespace()))

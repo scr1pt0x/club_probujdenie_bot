@@ -66,6 +66,12 @@ async def _status_content(
             "👤 Мой доступ\n\n🛡 Льготный доступ активен. Оплата не требуется.",
             _with_links(back_home_kb()),
         )
+    if user.access_suspended:
+        return (
+            "👤 Мой доступ\n\nДоступ ограничен администратором. "
+            "Для восстановления свяжитесь с ним. Повторно платить не нужно.",
+            back_home_kb(),
+        )
     membership = await membership_repo.get_active_membership(session, user_id=user.id)
     text = (
         "👤 Мой доступ\n\n"
@@ -113,7 +119,11 @@ async def access_links_handler(callback: types.CallbackQuery, session: AsyncSess
         session, user.id, datetime.now(timezone.utc)
     ):
         await callback.answer(
-            "Действующего доступа нет. Откройте раздел оплаты.", show_alert=True
+            "Доступ ограничен администратором. "
+            "Свяжитесь с ним; платить повторно не нужно."
+            if user and user.access_suspended and not user.access_exempt
+            else "Действующего доступа нет. Откройте раздел оплаты.",
+            show_alert=True,
         )
         return
     links = await grant_access(callback.bot, user.tg_id)

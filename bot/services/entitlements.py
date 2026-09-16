@@ -1,7 +1,7 @@
 from collections.abc import Collection
 from datetime import datetime
 
-from sqlalchemy import or_, select
+from sqlalchemy import and_, exists, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.db.models import (
@@ -12,6 +12,30 @@ from bot.db.models import (
     PaymentStatus,
     User,
 )
+
+
+def valid_access_predicate(now: datetime, *, exclude_membership_ids=()):
+    """Shared policy for admission, expiry protection and mailing audiences."""
+    membership = select(Membership.id).where(
+        Membership.user_id == User.id,
+        Membership.status == MembershipStatus.ACTIVE,
+        or_(Membership.grace_end_at >= now, Membership.pay_later_deadline_at > now),
+    )
+    if exclude_membership_ids:
+        membership = membership.where(Membership.id.notin_(exclude_membership_ids))
+    paid = (
+        select(Payment.id)
+        .join(Flow, Payment.flow_id == Flow.id)
+        .where(
+            Payment.user_id == User.id,
+            Payment.status == PaymentStatus.PAID,
+            Flow.end_at > now,
+        )
+    )
+    return or_(
+        User.access_exempt.is_(True),
+        and_(User.access_suspended.is_(False), or_(exists(membership), exists(paid))),
+    )
 
 
 async def has_unresolved_payment(session: AsyncSession, user_id: int) -> bool:
@@ -35,34 +59,10 @@ async def has_valid_access(
     exclude_membership_ids: Collection[int] = (),
 ) -> bool:
     """Return whether revoking Telegram access would be unsafe for this user."""
-    access_exempt = await session.execute(
-        select(User.access_exempt).where(User.id == user_id)
-    )
-    if access_exempt.scalar_one_or_none() is True:
-        return True
-
-    membership_query = (
-        select(Membership.id)
-        .where(Membership.user_id == user_id)
-        .where(Membership.status == MembershipStatus.ACTIVE)
-        .where(
-            or_(Membership.grace_end_at >= now, Membership.pay_later_deadline_at > now)
+    result = await session.execute(
+        select(User.id).where(
+            User.id == user_id,
+            valid_access_predicate(now, exclude_membership_ids=exclude_membership_ids),
         )
-        .limit(1)
     )
-    if exclude_membership_ids:
-        membership_query = membership_query.where(
-            Membership.id.notin_(exclude_membership_ids)
-        )
-    if (await session.execute(membership_query)).scalar_one_or_none() is not None:
-        return True
-
-    paid_query = (
-        select(Payment.id)
-        .join(Flow, Payment.flow_id == Flow.id)
-        .where(Payment.user_id == user_id)
-        .where(Payment.status == PaymentStatus.PAID)
-        .where(Flow.end_at > now)
-        .limit(1)
-    )
-    return (await session.execute(paid_query)).scalar_one_or_none() is not None
+    return result.scalar_one_or_none() is not None

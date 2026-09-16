@@ -21,10 +21,9 @@ def compute_grace_end(access_end: datetime, grace_days: int) -> datetime:
     return access_end + timedelta(days=grace_days)
 
 
-def is_within_grace(
-    active_membership: Membership, paid_at: datetime, grace_days: int
-) -> bool:
-    return paid_at <= compute_grace_end(active_membership.access_end_at, grace_days)
+def is_within_grace(active_membership: Membership, paid_at: datetime) -> bool:
+    # Settings apply to newly granted terms, not promises already stored in DB.
+    return paid_at <= active_membership.grace_end_at
 
 
 async def upsert_membership_for_flow(
@@ -51,9 +50,16 @@ async def upsert_membership_for_flow(
         return membership
 
     membership.status = MembershipStatus.ACTIVE
-    membership.access_start_at = access_start_at
-    membership.access_end_at = access_end_at
-    membership.grace_end_at = compute_grace_end(access_end_at, effective.grace_days)
+    membership.access_start_at = min(membership.access_start_at, access_start_at)
+    membership.access_end_at = max(
+        membership.access_end_at,
+        access_end_at,
+        membership.pay_later_deadline_at or access_end_at,
+    )
+    membership.grace_end_at = max(
+        membership.grace_end_at,
+        compute_grace_end(membership.access_end_at, effective.grace_days),
+    )
     membership.last_payment_id = payment.id
     return membership
 
@@ -74,7 +80,9 @@ async def apply_pay_later(
     membership.pay_later_used_at = now
     membership.pay_later_deadline_at = deadline
     membership.access_end_at = max(membership.access_end_at, deadline)
-    membership.grace_end_at = deadline + timedelta(days=effective.grace_days)
+    membership.grace_end_at = max(
+        membership.grace_end_at, deadline + timedelta(days=effective.grace_days)
+    )
 
     return True, f"Отсрочка активна до {deadline.strftime('%d.%m.%Y')}."
 

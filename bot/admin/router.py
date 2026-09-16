@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 from aiogram import Router, types
+from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -25,13 +26,19 @@ from bot.admin.keyboards import (
     user_card_kb,
     users_search_kb,
 )
+from bot.admin.payment_reviews import payment_reviews_screen
 from bot.admin.templates import DEFAULT_TEMPLATES
 from bot.db.models import Flow, Membership, MembershipStatus
 from bot.repositories import flows as flow_repo
 from bot.repositories import memberships as membership_repo
 from bot.repositories import promos as promo_repo
 from bot.repositories.app_settings import get_setting, set_setting
-from bot.repositories.audit_log import add_audit_log, list_audit_logs
+from bot.repositories.audit_log import (
+    add_audit_log,
+    get_action_payload,
+    list_audit_logs,
+    recent_campaigns,
+)
 from bot.repositories.message_templates import get_template_by_key, upsert_template
 from bot.repositories.promos import delete_user_promos
 from bot.repositories.users import (
@@ -64,7 +71,10 @@ logger = logging.getLogger(__name__)
 def _extend_membership_seven_days(membership, now, grace_days):
     membership.status = MembershipStatus.ACTIVE
     membership.access_end_at = max(membership.access_end_at, now) + timedelta(days=7)
-    membership.grace_end_at = compute_grace_end(membership.access_end_at, grace_days)
+    membership.grace_end_at = max(
+        membership.grace_end_at,
+        compute_grace_end(membership.access_end_at, grace_days),
+    )
     if membership.pay_later_deadline_at:
         membership.pay_later_deadline_at = max(
             membership.pay_later_deadline_at, membership.access_end_at
@@ -137,6 +147,11 @@ def _admin_keyboard() -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton(text="📝 Тексты", callback_data="admin:texts"),
                 InlineKeyboardButton(text="🧾 Журнал", callback_data="admin:audit"),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="💳 Проверка платежей", callback_data="admin:payments"
+                )
             ],
         ]
     )
@@ -466,6 +481,10 @@ async def admin_section(
         return
 
     section = callback.data.split(":", 1)[1]
+    if section == "payments" or section.startswith("payments:"):
+        await state.clear()
+        await payment_reviews_screen(callback, session, section)
+        return
     if section in {
         "menu",
         "flows",
@@ -552,6 +571,12 @@ async def admin_section(
             return
     elif section.startswith("mailings:"):
         parts = section.split(":")
+        if len(parts) == 2 and parts[1] == "history":
+            await show_mailing_history(callback, session)
+            return
+        if len(parts) == 3 and parts[1] == "resume":
+            await resume_custom_mailing(callback, session, parts[2])
+            return
         if len(parts) == 3 and parts[1] == "send":
             await confirm_custom_mailing(callback, session, state, parts[2])
             return
@@ -731,11 +756,23 @@ async def admin_section(
                 membership = Membership(user_id=user.id, flow_id=flow.id)
                 session.add(membership)
             membership.status = MembershipStatus.ACTIVE
-            membership.access_start_at = flow.start_at
-            membership.access_end_at = flow.end_at
-            membership.grace_end_at = compute_grace_end(
-                flow.end_at, effective.grace_days
+            membership.access_start_at = min(
+                membership.access_start_at or flow.start_at, flow.start_at
             )
+            membership.access_end_at = max(
+                membership.access_end_at or flow.end_at,
+                flow.end_at,
+                membership.pay_later_deadline_at or flow.end_at,
+            )
+            membership.grace_end_at = max(
+                membership.grace_end_at or flow.end_at,
+                compute_grace_end(membership.access_end_at, effective.grace_days),
+            )
+            user.access_suspended = False
+            if membership.pay_later_deadline_at:
+                membership.pay_later_deadline_at = max(
+                    membership.pay_later_deadline_at, membership.access_end_at
+                )
             access_result = await grant_access(callback.message.bot, user.tg_id)
             await add_audit_log(
                 session,
@@ -830,11 +867,22 @@ async def admin_section(
                 )
                 await callback.answer()
                 return
+            user.access_suspended = True
             if not access_result.successful:
-                await session.rollback()
+                await add_audit_log(
+                    session,
+                    "admin_user_action",
+                    {
+                        "tg_id": user.tg_id,
+                        "action": "suspend_access_partial",
+                        "actor_tg_id": callback.from_user.id,
+                    },
+                    actor_user_id=admin_user.id,
+                )
+                await session.commit()
                 await callback.message.answer(
-                    "⚠️ Исключение выполнено не во всех чатах. Записи участия "
-                    "не изменены — устраните проблему с правами и повторите."
+                    "⚠️ Исключение выполнено не во всех чатах. Повторный вход "
+                    "запрещён; устраните проблему с правами и повторите исключение."
                 )
                 await callback.answer()
                 return
@@ -868,6 +916,8 @@ async def admin_section(
 
         if action in {"exempt_on", "exempt_off_confirm"}:
             user.access_exempt = action == "exempt_on"
+            if user.access_exempt:
+                user.access_suspended = False
             await add_audit_log(
                 session,
                 action="admin_user_action",
@@ -897,6 +947,7 @@ async def admin_section(
                 await callback.answer()
                 return
             _extend_membership_seven_days(membership, now, effective.grace_days)
+            user.access_suspended = False
             await add_audit_log(
                 session,
                 action="admin_user_action",
@@ -907,8 +958,8 @@ async def admin_section(
                 },
                 actor_user_id=admin_user.id,
             )
-            await session.commit()
             access_result = await grant_access(callback.message.bot, user.tg_id)
+            await session.commit()
             await callback.message.answer(
                 "✅ Продлено на 7 дней. Ссылки доступны участнице в «Мой доступ»."
                 if access_result.successful
@@ -1035,7 +1086,15 @@ async def admin_section(
                 return
             await state.set_state(TemplateEditState.waiting_text)
             await state.update_data(template_key=key)
-            await callback.message.answer("Пришлите новый текст одним сообщением.")
+            await callback.message.answer(
+                "Пришлите новый текст одним сообщением."
+                + (
+                    "\nДля расписания обязательны {start}, {end}, {sales_status}. "
+                    "Даты подставятся автоматически; {kind} — тип потока."
+                    if key == "schedule_text"
+                    else ""
+                )
+            )
             await callback.answer()
             return
         if len(parts) == 3 and parts[1] == "test":
@@ -1219,6 +1278,7 @@ async def user_search_handler(
         f"имя: {user.first_name or ''} {user.last_name or ''}".strip() or "имя: —",
         f"доступ сейчас: {'да' if has_access else 'нет'}",
         f"льготная защита: {'включена' if user.access_exempt else 'нет'}",
+        f"ручное ограничение: {'включено' if user.access_suspended else 'нет'}",
     ]
 
     if membership:
@@ -1516,16 +1576,99 @@ async def confirm_custom_mailing(callback, session, state, key: str) -> None:
         actor_tg_id=callback.from_user.id,
         audience=data["audience"],
         total=len(data["user_ids"]),
+        user_ids=data["user_ids"],
+        source_chat_id=data["source_chat_id"],
+        source_message_id=data["source_message_id"],
     ):
         await state.clear()
         await callback.answer("Эта рассылка уже запущена.", show_alert=True)
         return
     await state.clear()
-    await callback.answer("Отправка началась")
-    await edit_screen(
-        callback.message,
-        f"📨 Отправляю {len(data['user_ids'])} получателям. "
-        "Это может занять несколько минут. Результат появится здесь.",
+    await _run_custom_mailing(callback, session, data, key)
+
+
+async def _mailing_ui(awaitable):
+    # Delivery must not depend on acknowledging an old button or editing a menu.
+    try:
+        await awaitable
+    except (TelegramAPIError, TimeoutError, OSError) as exc:
+        logger.warning("Mailing UI unavailable: %s", type(exc).__name__)
+
+
+async def show_mailing_history(callback, session):
+    rows = []
+    for entry in await recent_campaigns(session):
+        data = entry.payload
+        if "user_ids" not in data:  # Pre-migration journal cannot resume safely.
+            continue
+        finished = await get_action_payload(
+            session, "custom_mailing_finished", data["key"]
+        )
+        label = (
+            "Результат" if finished and not finished.get("stopped") else "Продолжить"
+        )
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=(
+                        f"{label} · {entry.created_at:%d.%m %H:%M} UTC · "
+                        f"{data['total']} чел."
+                    ),
+                    callback_data=f"admin:mailings:resume:{data['key']}",
+                )
+            ]
+        )
+    rows.extend(back_menu_kb("admin:mailings").inline_keyboard)
+    await _mailing_ui(
+        edit_screen(
+            callback.message,
+            "Последние рассылки. Продолжение отправляет только тем, для кого ещё "
+            "не было попытки. Неопределённые доставки не повторяются.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+        )
+    )
+    await _mailing_ui(callback.answer())
+
+
+async def resume_custom_mailing(callback, session, key):
+    data = await get_action_payload(session, "custom_mailing_started", key)
+    if not data or "user_ids" not in data:
+        await _mailing_ui(
+            callback.answer("Нет данных для продолжения.", show_alert=True)
+        )
+        return
+    finished = await get_action_payload(session, "custom_mailing_finished", key)
+    if finished and not finished.get("stopped"):
+        await _mailing_ui(
+            edit_screen(
+                callback.message,
+                "Рассылка завершена. Повторная отправка не выполняется.\n"
+                f"Последний запуск: доставлено {finished['sent']}, "
+                f"пропущено ранее обработанных {finished['skipped']}, "
+                f"неопределённых {finished['unknown']}, "
+                f"ошибок {finished['failed'] + finished['rate_limited']}, "
+                f"блокировок {finished['blocked']}.",
+                reply_markup=back_menu_kb("admin:mailings:history"),
+            )
+        )
+        await _mailing_ui(callback.answer())
+        return
+    if not await get_mailings_enabled(session):
+        await _mailing_ui(
+            callback.answer("Сначала включите рассылки.", show_alert=True)
+        )
+        return
+    await _run_custom_mailing(callback, session, data, key)
+
+
+async def _run_custom_mailing(callback, session, data, key):
+    await _mailing_ui(callback.answer("Отправка началась"))
+    await _mailing_ui(
+        edit_screen(
+            callback.message,
+            f"📨 Отправляю {len(data['user_ids'])} получателям. "
+            "Это может занять несколько минут. Результат появится здесь.",
+        )
     )
     try:
         result = await send_custom_broadcast(
@@ -1541,21 +1684,27 @@ async def confirm_custom_mailing(callback, session, state, key: str) -> None:
         await session.rollback()
         await add_audit_log(session, "custom_mailing_interrupted", {"key": key})
         await session.commit()
-        await edit_screen(
-            callback.message,
-            "⚠️ Рассылка прервана. Часть сообщений могла "
-            "уйти. Не запускайте её повторно целиком: результат сохранён в журнале.",
-            reply_markup=back_menu_kb("admin:mailings"),
+        await _mailing_ui(
+            edit_screen(
+                callback.message,
+                "⚠️ Рассылка прервана. Часть сообщений могла "
+                "уйти. Продолжите через «Последние рассылки»: "
+                "ранее начатые доставки не повторятся.",
+                reply_markup=back_menu_kb("admin:mailings"),
+            )
         )
         return
-    await edit_screen(
-        callback.message,
-        f"Рассылка {'остановлена' if result.get('stopped') else 'завершена'}.\n"
-        f"Доставлено: {result['sent']}\nЗаблокировали бота: {result['blocked']}\n"
-        f"Ошибки: {result['failed'] + result['rate_limited']}\n"
-        f"Доставка не подтверждена: {result['unknown']}\n"
-        f"Пропущено: {result['skipped']}",
-        reply_markup=back_menu_kb("admin:mailings"),
+    await _mailing_ui(
+        edit_screen(
+            callback.message,
+            f"Рассылка {'остановлена' if result.get('stopped') else 'завершена'}.\n"
+            "Результат этого запуска:\n"
+            f"Доставлено: {result['sent']}\nЗаблокировали бота: {result['blocked']}\n"
+            f"Ошибки: {result['failed'] + result['rate_limited']}\n"
+            f"Доставка не подтверждена: {result['unknown']}\n"
+            f"Пропущено: {result['skipped']}",
+            reply_markup=back_menu_kb("admin:mailings"),
+        )
     )
 
 
@@ -1615,6 +1764,19 @@ async def template_text_handler(
     if not text.strip():
         await message.answer("Отправьте непустой текст шаблона.")
         return
+    if key == "schedule_text":
+        try:
+            if not all(
+                field in text for field in ("{start}", "{end}", "{sales_status}")
+            ):
+                raise ValueError("Missing schedule fields")
+            text.format(start="дата", end="дата", sales_status="статус", kind="тип")
+        except (KeyError, ValueError, IndexError, AttributeError):
+            await message.answer(
+                "Используйте {start}, {end}, {sales_status} и при желании {kind}. "
+                "Не задавайте даты вручную — иначе расписание устареет."
+            )
+            return
     await upsert_template(session, key, text)
     await session.commit()
     await state.clear()

@@ -23,6 +23,24 @@ fileConfig(config.config_file_name)
 target_metadata = Base.metadata
 
 
+def include_object(obj, name, type_, reflected, compare_to):
+    # Kept as a historical archive by the original migrations. Never generate
+    # a destructive DROP merely because current promo_codes replaced it.
+    return not (
+        type_ == "table" and name == "promos" and reflected and compare_to is None
+    )
+
+
+def prepare_version_table() -> None:
+    # Existing published revision IDs exceed Alembic's default VARCHAR(32).
+    # Keep those IDs stable, including on fresh installs and restore rehearsals.
+    context.execute(
+        "CREATE TABLE IF NOT EXISTS alembic_version "
+        "(version_num TEXT NOT NULL PRIMARY KEY)"
+    )
+    context.execute("ALTER TABLE alembic_version ALTER COLUMN version_num TYPE TEXT")
+
+
 def run_migrations_offline() -> None:
     url = settings.database_url
     context.configure(
@@ -30,16 +48,23 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
+        include_object=include_object,
     )
 
     with context.begin_transaction():
+        prepare_version_table()
         context.run_migrations()
 
 
 def do_run_migrations(connection) -> None:
-    context.configure(connection=connection, target_metadata=target_metadata)
+    context.configure(
+        connection=connection,
+        target_metadata=target_metadata,
+        include_object=include_object,
+    )
 
     with context.begin_transaction():
+        prepare_version_table()
         context.run_migrations()
 
 

@@ -103,6 +103,12 @@ def mailings_menu_kb(enabled: bool) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text=toggle_text, callback_data="admin:mailings:toggle")],
         [
             InlineKeyboardButton(
+                text="📋 Последние рассылки / продолжить",
+                callback_data="admin:mailings:history",
+            )
+        ],
+        [
+            InlineKeyboardButton(
                 text="👥 Всем",
                 callback_data="admin:mailings:custom:all",
             ),

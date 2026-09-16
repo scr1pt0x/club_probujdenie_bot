@@ -4,7 +4,7 @@ from datetime import datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from aiogram import Bot
-from sqlalchemy import distinct, exists, or_, select
+from sqlalchemy import distinct, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.admin.templates import DEFAULT_TEMPLATES
@@ -20,7 +20,7 @@ from bot.repositories import flows as flow_repo
 from bot.repositories.audit_log import add_audit_log, has_action_with_key
 from bot.repositories.message_templates import get_template_by_key
 from bot.services.delivery import claim_attempt, deliver
-from bot.services.entitlements import has_valid_access
+from bot.services.entitlements import has_valid_access, valid_access_predicate
 from bot.services.settings import get_mailings_enabled
 from config import settings
 
@@ -28,20 +28,7 @@ logger = logging.getLogger(__name__)
 
 
 async def _get_active_user_ids(session: AsyncSession, now: datetime) -> list[int]:
-    result = await session.execute(
-        select(User.id).where(
-            or_(
-                User.access_exempt.is_(True),
-                exists(
-                    select(Membership.id).where(
-                        Membership.user_id == User.id,
-                        Membership.status == MembershipStatus.ACTIVE,
-                        Membership.grace_end_at >= now,
-                    )
-                ),
-            )
-        )
-    )
+    result = await session.execute(select(User.id).where(valid_access_predicate(now)))
     return [row[0] for row in result.all()]
 
 
