@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.db.models import Membership, MembershipStatus
@@ -37,6 +37,12 @@ async def list_memberships_to_expire(
         select(Membership)
         .where(Membership.status == MembershipStatus.ACTIVE)
         .where(Membership.grace_end_at < now)
+        .where(
+            or_(
+                Membership.pay_later_deadline_at.is_(None),
+                Membership.pay_later_deadline_at <= now,
+            )
+        )
     )
     return list(result.scalars().all())
 
@@ -51,6 +57,37 @@ async def get_latest_membership(
         .limit(1)
     )
     return result.scalars().first()
+
+
+async def recheck_expiring_memberships(
+    session: AsyncSession,
+    user_id: int,
+    membership_ids: set[int],
+    now: datetime,
+    *,
+    pay_later: bool = False,
+) -> list[Membership]:
+    """Called under the user lock; discard stale decisions and refresh ORM rows."""
+    query = select(Membership).where(
+        Membership.user_id == user_id,
+        Membership.id.in_(membership_ids),
+        Membership.status == MembershipStatus.ACTIVE,
+    )
+    if pay_later:
+        query = query.where(Membership.pay_later_deadline_at <= now)
+    else:
+        query = query.where(
+            Membership.grace_end_at < now,
+            or_(
+                Membership.pay_later_deadline_at.is_(None),
+                Membership.pay_later_deadline_at <= now,
+            ),
+        )
+    return list(
+        (await session.execute(query.execution_options(populate_existing=True)))
+        .scalars()
+        .all()
+    )
 
 
 async def expire_all_active_memberships(session: AsyncSession, user_id: int) -> int:

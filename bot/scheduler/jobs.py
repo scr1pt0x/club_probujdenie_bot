@@ -16,7 +16,7 @@ from bot.repositories import memberships as membership_repo
 from bot.repositories import payments as payment_repo
 from bot.repositories import users as user_repo
 from bot.repositories.audit_log import add_audit_log
-from bot.services.entitlements import has_valid_access
+from bot.services.entitlements import has_unresolved_payment, has_valid_access
 from bot.services.mailings import (
     send_auto_end_mailings,
     send_flow_mailings,
@@ -112,6 +112,13 @@ async def expire_memberships(session: AsyncSession, bot: Bot) -> None:
 
     for user_id, stale in grouped.items():
         user = await user_repo.lock_user_by_id(session, user_id)
+        now = datetime.now(timezone.utc)
+        stale = await membership_repo.recheck_expiring_memberships(
+            session, user_id, {m.id for m in stale}, now
+        )
+        if not stale:
+            await session.commit()
+            continue
         excluded_ids = {membership.id for membership in stale}
         # Recheck only after taking the same lock used by payment confirmation.
         # A payment committed while the job was building its candidate list must
@@ -125,6 +132,12 @@ async def expire_memberships(session: AsyncSession, bot: Bot) -> None:
             await session.commit()
             continue
 
+        if await has_unresolved_payment(session, user_id):
+            logger.warning(
+                "Automatic revoke held: unresolved payment user_id=%s", user_id
+            )
+            await session.commit()
+            continue
         result = await revoke_access(bot, user.tg_id)
         if result.successful:
             for membership in stale:
@@ -170,6 +183,13 @@ async def enforce_pay_later_deadlines(session: AsyncSession, bot: Bot) -> None:
         return
     for user_id, overdue in grouped.items():
         user = await user_repo.lock_user_by_id(session, user_id)
+        now = datetime.now(timezone.utc)
+        overdue = await membership_repo.recheck_expiring_memberships(
+            session, user_id, {m.id for m in overdue}, now, pay_later=True
+        )
+        if not overdue:
+            await session.commit()
+            continue
         excluded_ids = {membership.id for membership in overdue}
         keep_access = await has_valid_access(
             session, user_id, now, exclude_membership_ids=excluded_ids
@@ -180,6 +200,12 @@ async def enforce_pay_later_deadlines(session: AsyncSession, bot: Bot) -> None:
             await session.commit()
             continue
 
+        if await has_unresolved_payment(session, user_id):
+            logger.warning(
+                "Pay-later revoke held: unresolved payment user_id=%s", user_id
+            )
+            await session.commit()
+            continue
         result = await revoke_access(bot, user.tg_id)
         if not result.successful:
             # Keep all rows active so the next run retries instead of hiding a
@@ -212,10 +238,13 @@ async def check_pending_payments(
 ) -> None:
     now = datetime.now(timezone.utc)
     pending = await payment_repo.list_pending_payments(session)
-    for listed_payment in pending:
+    # Rollback expires ORM objects; keep primitive identifiers for later rows
+    # and logging so one provider failure cannot abort the entire batch.
+    pending_ids = [(p.id, p.external_id) for p in pending]
+    for listed_id, external_id in pending_ids:
         try:
             payment = await payment_repo.get_payment_by_external_id(
-                session, listed_payment.external_id
+                session, external_id
             )
             if payment is None or payment.status != PaymentStatus.PENDING:
                 await session.commit()
@@ -224,7 +253,7 @@ async def check_pending_payments(
                 await session.commit()
                 continue
             payment = await payment_repo.get_payment_by_external_id(
-                session, listed_payment.external_id
+                session, external_id
             )
             if payment is None or payment.status != PaymentStatus.PENDING:
                 await session.commit()
@@ -298,7 +327,7 @@ async def check_pending_payments(
             await session.rollback()
             logger.exception(
                 "Failed to process pending payment",
-                extra={"payment_id": payment.id, "external_id": payment.external_id},
+                extra={"payment_id": listed_id, "external_id": external_id},
             )
 
 

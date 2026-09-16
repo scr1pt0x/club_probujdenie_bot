@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import httpx
+import pytest
 
 from bot.access_control import service as access_service
 from bot.admin.keyboards import user_card_kb
@@ -244,6 +245,19 @@ def test_webhook_rejects_invalid_json_without_server_error():
 
     response = run(make_request())
     assert response.status_code == 400
+
+
+@pytest.mark.parametrize("payload", [[], {"object": [1]}, {"object": {"id": [1]}}])
+def test_webhook_rejects_invalid_payload_shapes(payload):
+    async def scenario():
+        transport = httpx.ASGITransport(app=create_app(SimpleNamespace()))
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test"
+        ) as client:
+            response = await client.post("/api/yookassa/webhook", json=payload)
+            assert response.status_code == 400
+
+    run(scenario())
 
 
 def test_pay_later_is_not_offered_for_stale_membership(monkeypatch):

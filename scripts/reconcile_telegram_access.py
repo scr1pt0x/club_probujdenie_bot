@@ -23,7 +23,7 @@ from bot.db.models import (
 from bot.db.session import AsyncSessionLocal
 from bot.repositories.audit_log import add_audit_log
 from bot.repositories.users import lock_user_by_tg_id
-from bot.services.entitlements import has_valid_access
+from bot.services.entitlements import has_unresolved_payment, has_valid_access
 from config import settings
 
 PRESENT_STATUSES = {"member", "restricted"}
@@ -113,8 +113,12 @@ async def main() -> None:
         for tg_id in candidates:
             async with AsyncSessionLocal() as session:
                 user = await lock_user_by_tg_id(session, tg_id)
-                if user is None or await has_valid_access(
-                    session, user.id, datetime.now(timezone.utc)
+                if (
+                    user is None
+                    or await has_valid_access(
+                        session, user.id, datetime.now(timezone.utc)
+                    )
+                    or await has_unresolved_payment(session, user.id)
                 ):
                     preserved += 1
                     await session.commit()

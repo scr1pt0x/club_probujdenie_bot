@@ -42,6 +42,11 @@ async def _status_content(
         is_admin=tg_user.id in settings.admin_tg_ids,
     )
     await session.commit()
+    if user.access_exempt:
+        return (
+            "👤 Мой доступ\n\n🛡 Льготный доступ активен. Оплата не требуется.",
+            back_home_kb(),
+        )
     membership = await membership_repo.get_active_membership(session, user_id=user.id)
     text = (
         "👤 Мой доступ\n\n"

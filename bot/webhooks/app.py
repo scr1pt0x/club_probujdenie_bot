@@ -41,7 +41,11 @@ def create_app(bot) -> FastAPI:
             return Response(status_code=400)
         event = payload.get("event")
         obj = payload.get("object") or {}
+        if not isinstance(obj, dict):
+            return Response(status_code=400)
         payment_id = obj.get("id")
+        if payment_id and not isinstance(payment_id, str):
+            return Response(status_code=400)
         if not payment_id:
             return Response(status_code=200)
 

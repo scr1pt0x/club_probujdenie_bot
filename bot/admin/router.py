@@ -1,4 +1,6 @@
+import logging
 from datetime import datetime, timedelta, timezone
+from uuid import uuid4
 
 from aiogram import Router, types
 from aiogram.filters import Command
@@ -39,9 +41,10 @@ from bot.repositories.users import (
     get_user_by_username,
     lock_user_by_id,
 )
+from bot.services.delivery import claim_attempt
 from bot.services.entitlements import has_valid_access
-from bot.services.flows import sales_window_for_start
-from bot.services.mailings import send_custom_broadcast
+from bot.services.flows import extend_memberships_for_flow, sales_window_for_start
+from bot.services.mailings import custom_audience_ids, send_custom_broadcast
 from bot.services.memberships import compute_grace_end
 from bot.services.settings import (
     get_effective_settings,
@@ -55,6 +58,7 @@ from bot.ui.navigation import edit_screen, send_clean_screen
 from config import settings
 
 router = Router()
+logger = logging.getLogger(__name__)
 
 
 def _next_paid_start_after_flow_end(flow_end_at: datetime) -> datetime:
@@ -100,6 +104,7 @@ class ShopPriceEditState(StatesGroup):
 
 class CustomMailingState(StatesGroup):
     waiting_text = State()
+    confirming = State()
 
 
 def _admin_keyboard() -> InlineKeyboardMarkup:
@@ -127,11 +132,14 @@ def _admin_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-@router.message(Command("admin"))
-async def admin_menu(message: types.Message, session: AsyncSession) -> None:
+@router.message(Command("admin", ignore_case=True))
+async def admin_menu(
+    message: types.Message, session: AsyncSession, state: FSMContext
+) -> None:
     if message.from_user.id not in settings.admin_tg_ids:
         await message.answer("Доступ запрещен")
         return
+    await state.clear()
     await add_audit_log(
         session,
         action="admin_menu_opened",
@@ -534,6 +542,9 @@ async def admin_section(
             return
     elif section.startswith("mailings:"):
         parts = section.split(":")
+        if len(parts) == 3 and parts[1] == "send":
+            await confirm_custom_mailing(callback, session, state, parts[2])
+            return
         if len(parts) == 2 and parts[1] == "toggle":
             enabled = await get_mailings_enabled(session)
             await set_setting(
@@ -545,6 +556,7 @@ async def admin_section(
             await _show_mailings_screen(callback, session)
             return
         if len(parts) == 2 and parts[1] == "custom":
+            await state.clear()
             await edit_screen(
                 callback.message,
                 "Выберите аудиторию:",
@@ -558,10 +570,11 @@ async def admin_section(
                 await callback.answer("Неизвестная аудитория", show_alert=True)
                 return
             await state.set_state(CustomMailingState.waiting_text)
-            await state.update_data(audience=audience)
+            await state.set_data({"audience": audience})
             await edit_screen(
                 callback.message,
-                "Введите текст рассылки одним сообщением.",
+                "Пришлите текст, фото или видео с подписью одним сообщением. "
+                "Сначала покажу предпросмотр; отправка — только после подтверждения.",
                 reply_markup=back_menu_kb("admin:mailings"),
             )
             await callback.answer()
@@ -764,7 +777,32 @@ async def admin_section(
             await callback.answer()
             return
 
-        if action == "revoke":
+        if action in {"revoke", "exempt_off"}:
+            await session.commit()
+            confirm_action = (
+                "revoke_confirm" if action == "revoke" else "exempt_off_confirm"
+            )
+            await callback.message.answer(
+                "Вы уверены? Это действие может лишить участницу доступа."
+                "\nПодтвердите действие только для выбранной участницы.",
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [
+                            InlineKeyboardButton(
+                                text="Подтвердить",
+                                callback_data=f"admin:users:{confirm_action}:{user.id}",
+                            ),
+                            InlineKeyboardButton(
+                                text="Отмена", callback_data="admin:users"
+                            ),
+                        ]
+                    ]
+                ),
+            )
+            await callback.answer()
+            return
+
+        if action == "revoke_confirm":
             if user.access_exempt:
                 await session.rollback()
                 await callback.message.answer(
@@ -813,7 +851,13 @@ async def admin_section(
             return
 
         if action == "exempt":
-            user.access_exempt = not user.access_exempt
+            await callback.answer(
+                "Старая кнопка. Откройте карточку участницы заново.", show_alert=True
+            )
+            return
+
+        if action in {"exempt_on", "exempt_off_confirm"}:
+            user.access_exempt = action == "exempt_on"
             await add_audit_log(
                 session,
                 action="admin_user_action",
@@ -846,6 +890,10 @@ async def admin_section(
             membership.grace_end_at = compute_grace_end(
                 membership.access_end_at, effective.grace_days
             )
+            if membership.pay_later_deadline_at:
+                membership.pay_later_deadline_at = max(
+                    membership.pay_later_deadline_at, membership.access_end_at
+                )
             await add_audit_log(
                 session,
                 action="admin_user_action",
@@ -1066,6 +1114,11 @@ async def flow_edit_end_handler(
         await message.answer("Поток не найден.")
         return
 
+    duplicate = await flow_repo.get_flow_by_start(session, start_at, flow.is_free)
+    if duplicate is not None and duplicate.id != flow.id:
+        await message.answer("Поток с такой датой уже существует. Введите другие даты.")
+        return
+    await extend_memberships_for_flow(session, flow.id, end_at)
     flow.start_at = start_at
     flow.end_at = end_at
     flow.duration_weeks = max(1, (end_at - start_at).days // 7)
@@ -1350,24 +1403,150 @@ async def custom_mailing_text_handler(
         return
     data = await state.get_data()
     audience = data.get("audience")
+    logger.info(
+        "Custom mailing input: type=%s text_length=%s caption_length=%s audience=%s",
+        message.content_type,
+        len(message.text or ""),
+        len(message.caption or ""),
+        audience,
+    )
     if audience not in ("all", "active", "former", "current_unpaid"):
         await state.clear()
         await message.answer("Аудитория не найдена.")
         return
-    text = (message.text or "").strip()
-    if not text:
-        await message.answer("Введите текст рассылки одним сообщением.")
+    if message.media_group_id:
+        await message.answer(
+            "Для этой рассылки пришлите одно фото или видео, без альбома."
+        )
+        return
+    if not (message.text or message.photo or message.video or message.document):
+        await message.answer(
+            "Поддерживаются текст, фото, видео и документ. "
+            "Пришлите один из этих вариантов или нажмите «Назад»."
+        )
         return
     enabled = await get_mailings_enabled(session)
     if not enabled:
         await state.clear()
         await message.answer("⛔ Рассылки выключены. Включите в админке.")
         return
-    sent = await send_custom_broadcast(session, message.bot, audience, text)
+    user_ids = await custom_audience_ids(session, audience)
     await session.commit()
-    await state.clear()
+    if not user_ids:
+        await message.answer(
+            "В выбранной аудитории нет получателей. Выберите другую.",
+            reply_markup=back_menu_kb("admin:mailings"),
+        )
+        return
+    # Freeze the content in a bot-owned preview, including formatting and media.
+    preview = await message.bot.copy_message(
+        chat_id=message.chat.id,
+        from_chat_id=message.chat.id,
+        message_id=message.message_id,
+    )
+    key = uuid4().hex
+    await state.set_state(CustomMailingState.confirming)
+    await state.set_data(
+        {
+            "key": key,
+            "audience": audience,
+            "user_ids": user_ids,
+            "source_chat_id": message.chat.id,
+            "source_message_id": preview.message_id,
+        }
+    )
+    labels = {
+        "all": "Все пользователи",
+        "active": "Активные участницы",
+        "former": "Бывшие участницы",
+        "current_unpaid": "Не оплатившие продление",
+    }
     await message.answer(
-        f"Готово. Отправлено: {sent}", reply_markup=back_menu_kb("admin:mailings")
+        f"Предпросмотр выше.\nАудитория: {labels[audience]}\n"
+        f"Получателей: {len(user_ids)}\n"
+        "Отправить это сообщение?",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="✅ Отправить", callback_data=f"admin:mailings:send:{key}"
+                    )
+                ],
+                [InlineKeyboardButton(text="Отмена", callback_data="admin:mailings")],
+            ]
+        ),
+    )
+
+
+@router.message(CustomMailingState.confirming)
+async def custom_mailing_waiting_confirmation(message: types.Message) -> None:
+    if message.from_user.id in settings.admin_tg_ids:
+        await message.answer(
+            "Рассылка ещё не отправлена. Подтвердите предпросмотр "
+            "кнопкой «Отправить» или отмените его."
+        )
+
+
+async def confirm_custom_mailing(callback, session, state, key: str) -> None:
+    data = await state.get_data()
+    if (
+        await state.get_state() != CustomMailingState.confirming.state
+        or data.get("key") != key
+    ):
+        await callback.answer(
+            "Этот предпросмотр уже использован или устарел.", show_alert=True
+        )
+        return
+    if not await get_mailings_enabled(session):
+        await callback.answer("Рассылки выключены.", show_alert=True)
+        return
+    if not await claim_attempt(
+        session,
+        "custom_mailing_started",
+        key,
+        actor_tg_id=callback.from_user.id,
+        audience=data["audience"],
+        total=len(data["user_ids"]),
+    ):
+        await state.clear()
+        await callback.answer("Эта рассылка уже запущена.", show_alert=True)
+        return
+    await state.clear()
+    await callback.answer("Отправка началась")
+    await edit_screen(
+        callback.message,
+        f"📨 Отправляю {len(data['user_ids'])} получателям. "
+        "Это может занять несколько минут. Результат появится здесь.",
+    )
+    try:
+        result = await send_custom_broadcast(
+            session,
+            callback.bot,
+            user_ids=data["user_ids"],
+            source_chat_id=data["source_chat_id"],
+            source_message_id=data["source_message_id"],
+            key=key,
+        )
+    except Exception:
+        logger.exception("Custom mailing interrupted: key=%s", key)
+        await session.rollback()
+        await add_audit_log(session, "custom_mailing_interrupted", {"key": key})
+        await session.commit()
+        await edit_screen(
+            callback.message,
+            "⚠️ Рассылка прервана. Часть сообщений могла "
+            "уйти. Не запускайте её повторно целиком: результат сохранён в журнале.",
+            reply_markup=back_menu_kb("admin:mailings"),
+        )
+        return
+    await edit_screen(
+        callback.message,
+        f"Рассылка {'остановлена' if result.get('stopped') else 'завершена'}.\n"
+        f"Доставлено: {result['sent']}\nЗаблокировали бота: {result['blocked']}\n"
+        f"Ошибки: {result['failed'] + result['rate_limited']}\n"
+        f"Доставка не подтверждена: {result['unknown']}\n"
+        f"Пропущено: {result['skipped']}",
+        reply_markup=back_menu_kb("admin:mailings"),
     )
 
 
@@ -1399,8 +1578,8 @@ async def shop_price_edit_handler(
             await message.answer("Цена должна быть в диапазоне 0..1_000_000.")
             return
         mapping = {
-            "intro": "shop_intro_price",
-            "renewal": "shop_renewal_price",
+            "intro": "intro_price_rub",
+            "renewal": "renewal_price_rub",
         }
         await set_setting(session, mapping[key], str(value))
     await session.commit()

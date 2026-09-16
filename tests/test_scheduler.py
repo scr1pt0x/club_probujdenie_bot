@@ -48,12 +48,17 @@ def _patch_revoke_dependencies(monkeypatch, *, stale, access, revoke):
     async def no_audit(*args, **kwargs):
         return None
 
+    async def recheck(_session, user_id, ids, now, **kwargs):
+        return [m for m in stale if m.user_id == user_id and m.id in ids]
+
     monkeypatch.setattr(jobs, "_is_revoke_jobs_enabled", lambda: True)
     monkeypatch.setattr(jobs.membership_repo, "list_memberships_to_expire", list_stale)
     monkeypatch.setattr(jobs, "has_valid_access", access)
     monkeypatch.setattr(jobs.user_repo, "lock_user_by_id", lock_user)
     monkeypatch.setattr(jobs, "revoke_access", revoke)
     monkeypatch.setattr(jobs, "_record_automatic_revoke", no_audit)
+    monkeypatch.setattr(jobs, "has_unresolved_payment", no_audit)
+    monkeypatch.setattr(jobs.membership_repo, "recheck_expiring_memberships", recheck)
 
 
 def test_expiry_counts_only_users_who_would_actually_lose_access(monkeypatch):

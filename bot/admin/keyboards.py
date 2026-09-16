@@ -136,6 +136,7 @@ def users_search_kb() -> InlineKeyboardMarkup:
 
 
 def user_card_kb(user_id: int, *, access_exempt: bool = False) -> InlineKeyboardMarkup:
+    exempt_action = "exempt_off" if access_exempt else "exempt_on"
     rows = [
         [
             InlineKeyboardButton(
@@ -158,7 +159,7 @@ def user_card_kb(user_id: int, *, access_exempt: bool = False) -> InlineKeyboard
                     if access_exempt
                     else "🛡 Сделать льготницей"
                 ),
-                callback_data=f"admin:users:exempt:{user_id}",
+                callback_data=f"admin:users:{exempt_action}:{user_id}",
             ),
         ],
         [

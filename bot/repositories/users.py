@@ -1,4 +1,5 @@
 from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.db.models import User
@@ -20,15 +21,19 @@ async def get_or_create_user(
         user.last_name = last_name
         user.is_admin = is_admin or user.is_admin
         return user
-    user = User(
-        tg_id=tg_id,
-        username=username,
-        first_name=first_name,
-        last_name=last_name,
-        is_admin=is_admin,
+    # Concurrent /start updates must not race on users.tg_id.
+    await session.execute(
+        insert(User)
+        .values(
+            tg_id=tg_id,
+            username=username,
+            first_name=first_name,
+            last_name=last_name,
+            is_admin=is_admin,
+        )
+        .on_conflict_do_nothing(index_elements=[User.tg_id])
     )
-    session.add(user)
-    return user
+    return (await session.execute(select(User).where(User.tg_id == tg_id))).scalar_one()
 
 
 async def get_user_by_id(session: AsyncSession, user_id: int) -> User | None:
@@ -39,7 +44,10 @@ async def get_user_by_id(session: AsyncSession, user_id: int) -> User | None:
 async def lock_user_by_id(session: AsyncSession, user_id: int) -> User | None:
     """Serialize payment, grant and revoke decisions for one Telegram user."""
     result = await session.execute(
-        select(User).where(User.id == user_id).with_for_update()
+        select(User)
+        .where(User.id == user_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
     )
     return result.scalar_one_or_none()
 
@@ -51,7 +59,10 @@ async def get_user_by_tg_id(session: AsyncSession, tg_id: int) -> User | None:
 
 async def lock_user_by_tg_id(session: AsyncSession, tg_id: int) -> User | None:
     result = await session.execute(
-        select(User).where(User.tg_id == tg_id).with_for_update()
+        select(User)
+        .where(User.tg_id == tg_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
     )
     return result.scalar_one_or_none()
 

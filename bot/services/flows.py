@@ -3,8 +3,9 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bot.db.models import Flow
-from bot.repositories import flows as flow_repo
+from bot.db.models import Flow, Membership, MembershipStatus
+from bot.repositories.users import lock_user_by_id
+from bot.services.settings import get_effective_settings
 from config import settings
 
 
@@ -23,7 +24,9 @@ async def ensure_seed_flows(session: AsyncSession) -> None:
         free_end = parse_utc_date(settings.free_flow_end)
         open_at, close_at = sales_window_for_start(free_start)
 
-        result = await flow_repo.get_flow_by_start(session, free_start, True)
+        result = (
+            await session.execute(select(Flow).where(Flow.is_free.is_(True)).limit(1))
+        ).scalar_one_or_none()
         if result is None:
             session.add(
                 Flow(
@@ -41,7 +44,10 @@ async def ensure_seed_flows(session: AsyncSession) -> None:
     paid_end = paid_start + timedelta(weeks=5)
     paid_open, paid_close = sales_window_for_start(paid_start)
 
-    result = await flow_repo.get_flow_by_start(session, paid_start, False)
+    # Initial seeds are not recreated after an administrator edits their dates.
+    result = (
+        await session.execute(select(Flow).where(Flow.is_free.is_(False)).limit(1))
+    ).scalar_one_or_none()
     if result is None:
         session.add(
             Flow(
@@ -65,3 +71,43 @@ async def get_next_paid_flow(session: AsyncSession, now: datetime) -> Flow | Non
         .limit(1)
     )
     return result.scalars().first()
+
+
+async def extend_memberships_for_flow(
+    session: AsyncSession, flow_id: int, end_at: datetime
+) -> None:
+    """Extending a flow must extend existing access; never shorten purchased access."""
+    user_ids = list(
+        (
+            await session.scalars(
+                select(Membership.user_id)
+                .where(
+                    Membership.flow_id == flow_id,
+                    Membership.status == MembershipStatus.ACTIVE,
+                )
+                .order_by(Membership.user_id)
+            )
+        ).all()
+    )
+    effective = await get_effective_settings(session)
+    for user_id in user_ids:
+        await lock_user_by_id(session, user_id)
+        member = (
+            await session.execute(
+                select(Membership)
+                .where(
+                    Membership.flow_id == flow_id,
+                    Membership.user_id == user_id,
+                )
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one()
+        if member.status != MembershipStatus.ACTIVE:
+            continue
+        if member.access_end_at < end_at:
+            member.access_end_at = end_at
+            member.grace_end_at = max(
+                member.grace_end_at, end_at + timedelta(days=effective.grace_days)
+            )
+            if member.pay_later_deadline_at:
+                member.pay_later_deadline_at = max(member.pay_later_deadline_at, end_at)

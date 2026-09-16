@@ -5,14 +5,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bot.repositories.promos import get_latest_user_promo, get_promo_by_code
 
 
-def is_promo_valid(promo, now: datetime) -> bool:
+def is_promo_valid(promo, now: datetime, *, check_capacity: bool = True) -> bool:
     if not promo.active:
         return False
     if promo.starts_at and now < promo.starts_at:
         return False
     if promo.ends_at and now > promo.ends_at:
         return False
-    if promo.max_uses is not None and promo.used_count >= promo.max_uses:
+    if (
+        check_capacity
+        and promo.max_uses is not None
+        and promo.used_count >= promo.max_uses
+    ):
         return False
     return True
 
@@ -27,7 +31,8 @@ async def apply_promo_to_price(
     if not promo:
         return base_price
     now = datetime.now(timezone.utc)
-    if not is_promo_valid(promo, now):
+    # The slot was already reserved when this user's code was accepted.
+    if not is_promo_valid(promo, now, check_capacity=False):
         return base_price
 
     if promo.kind == "free":

@@ -183,38 +183,6 @@ async def _send_paid_access_links(
     )
 
 
-async def _resolve_free_access_flow(
-    session: AsyncSession, user_id: int, now: datetime
-) -> int | None:
-    active_membership = await membership_repo.get_active_membership(session, user_id)
-
-    # Продлевающие: приоритет на следующий платный, затем текущий платный.
-    if active_membership is not None:
-        next_paid = await flow_repo.get_next_paid_flow(session, now)
-        if next_paid:
-            return next_paid.id
-        active_paid = await flow_repo.get_active_paid_flow(session, now)
-        if active_paid:
-            return active_paid.id
-        return active_membership.flow_id
-
-    # Новые участницы: сначала платный поток, затем бесплатный (если включён).
-    next_paid = await flow_repo.get_next_paid_flow(session, now)
-    if next_paid:
-        return next_paid.id
-    active_paid = await flow_repo.get_active_paid_flow(session, now)
-    if active_paid:
-        return active_paid.id
-    if settings.free_flows_enabled:
-        next_free = await flow_repo.get_next_free_flow(session, now)
-        if next_free:
-            return next_free.id
-        active_free = await flow_repo.get_active_free_flow(session, now)
-        if active_free:
-            return active_free.id
-    return None
-
-
 async def _send_personal_payment_link(
     session: AsyncSession, tg_user: types.User, responder: ScreenResponder
 ) -> None:
@@ -232,6 +200,17 @@ async def _send_personal_payment_link(
     # two YooKassa orders before either request sees the other's PENDING row.
     await session.execute(select(User.id).where(User.id == user.id).with_for_update())
 
+    await session.refresh(user)
+    if user.access_exempt:
+        await session.commit()
+        links = await grant_access(responder.bot, user.tg_id)
+        await responder.answer(
+            "🛡 У вас льготный доступ. Оплата не требуется.",
+            reply_markup=access_links_kb(links.channel_link, links.group_link)
+            or back_home_kb(),
+        )
+        return
+
     # Оплата за текущий ещё действующий поток: обычно только повторяем ссылки.
     # Если открыт следующий поток и за него не платили, выставляем продление.
     if await _find_paid_payment_with_active_flow(session, user.id, now) is not None:
@@ -239,6 +218,24 @@ async def _send_personal_payment_link(
             await session.commit()
             await _send_paid_access_links(session, responder, tg_user.id)
             return
+
+    review = (
+        await session.execute(
+            select(Payment.id)
+            .where(
+                Payment.user_id == user.id,
+                Payment.status == PaymentStatus.NEEDS_REVIEW,
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if review is not None:
+        await responder.answer(
+            "Один из ваших платежей требует проверки администратором. "
+            "Повторно платить пока не нужно.",
+            reply_markup=back_home_kb(),
+        )
+        return
 
     latest_membership = await membership_repo.get_latest_membership(session, user.id)
     if (
@@ -257,42 +254,12 @@ async def _send_personal_payment_link(
             )
 
     price = await calculate_price_rub(session, user_id=user.id, paid_at=now)
-    if price <= 0:
-        flow_id = await _resolve_free_access_flow(session, user.id, now)
-        if flow_id is None:
-            await responder.answer(await get_text(session, "payment_needs_review"))
-            return
-        payment = Payment(
-            user_id=user.id,
-            provider="promo",
-            status=PaymentStatus.PENDING,
-            amount_rub=0,
-            currency="RUB",
-            flow_id=flow_id,
-        )
-        session.add(payment)
-        await session.flush()
-        links = await confirm_payment(
-            session, responder.bot, payment, paid_at=now, notify_user=False
-        )
-        await session.commit()
-        kb = access_links_kb(
-            links.channel_link if links else None,
-            links.group_link if links else None,
-        )
-        text = await get_text(
-            session, "payment_success" if kb else "payment_success_no_links"
-        )
-        await responder.answer(text, reply_markup=kb or back_home_kb())
-        return
-
     existing_pending = (
         await session.execute(
             select(Payment)
             .where(Payment.user_id == user.id)
             .where(Payment.status == PaymentStatus.PENDING)
             .where(Payment.external_id.is_not(None))
-            .where(Payment.amount_rub == price)
             .order_by(Payment.created_at.desc())
             .with_for_update()
             .limit(1)
@@ -303,12 +270,14 @@ async def _send_personal_payment_link(
         try:
             remote = await adapter.get_payment(existing_pending.external_id)
             if _payment_validation_error(remote, existing_pending):
+                existing_pending.status = PaymentStatus.NEEDS_REVIEW
+                await session.commit()
                 await responder.answer(
                     "Не удалось безопасно подтвердить принадлежность счёта. "
-                    "Создаю новый платёж."
+                    "Повторный счёт не создаётся. Обратитесь к администратору.",
+                    reply_markup=back_home_kb(),
                 )
-                existing_pending.status = PaymentStatus.FAILED
-                await session.flush()
+                return
             else:
                 remote_status = remote.get("status")
                 if remote_status == "succeeded":
@@ -334,6 +303,33 @@ async def _send_personal_payment_link(
                     existing_pending.status = PaymentStatus.FAILED
                     await session.flush()
                 elif remote_status == "pending":
+                    target_flow_id = await resolve_flow_for_payment(session, now)
+                    if (
+                        target_flow_id is None
+                        or existing_pending.flow_id != target_flow_id
+                    ):
+                        await responder.answer(
+                            "Счёт относится к другому набору или набор уже закрыт. "
+                            "Не оплачивайте его. Если деньги уже списаны, "
+                            "нажмите «Проверить оплату».",
+                            reply_markup=types.InlineKeyboardMarkup(
+                                inline_keyboard=[
+                                    [
+                                        types.InlineKeyboardButton(
+                                            text="Проверить оплату",
+                                            callback_data="payment:refresh",
+                                        )
+                                    ],
+                                    [
+                                        types.InlineKeyboardButton(
+                                            text="Главное меню",
+                                            callback_data="nav:home",
+                                        )
+                                    ],
+                                ]
+                            ),
+                        )
+                        return
                     conf = remote.get("confirmation", {})
                     url = conf.get("confirmation_url")
                     if url:
@@ -357,9 +353,10 @@ async def _send_personal_payment_link(
                                 ],
                             ]
                         )
+                        existing_price = format_price_rub(existing_pending.amount_rub)
                         await responder.answer(
                             "💳 У вас уже есть активный счёт\n\n"
-                            f"Сумма: {format_price_rub(price)} ₽\n"
+                            f"Сумма созданного счёта: {existing_price} ₽\n"
                             "Если вы уже оплатили, проверка обычно занимает до минуты.",
                             reply_markup=keyboard,
                         )
@@ -394,6 +391,31 @@ async def _send_personal_payment_link(
             "Дата следующего набора появится в расписании.",
             reply_markup=back_home_kb(),
         )
+        return
+
+    if price <= 0:
+        payment = Payment(
+            user_id=user.id,
+            provider="promo",
+            status=PaymentStatus.PENDING,
+            amount_rub=0,
+            currency="RUB",
+            flow_id=target_flow_id,
+        )
+        session.add(payment)
+        await session.flush()
+        links = await confirm_payment(
+            session, responder.bot, payment, paid_at=now, notify_user=False
+        )
+        await session.commit()
+        kb = access_links_kb(
+            links.channel_link if links else None,
+            links.group_link if links else None,
+        )
+        text = await get_text(
+            session, "payment_success" if kb else "payment_success_no_links"
+        )
+        await responder.answer(text, reply_markup=kb or back_home_kb())
         return
 
     payment = Payment(
@@ -760,10 +782,24 @@ async def payment_refresh_handler(
     if pending_payment is None:
         if await _find_paid_payment_with_active_flow(session, user.id, now) is not None:
             if await _should_offer_renewal_checkout(session, user.id, now):
-                await _send_personal_payment_link(
-                    session,
-                    callback.from_user,
-                    ScreenResponder(callback.message, edit_existing=True),
+                await responder.answer(
+                    "Предыдущая оплата подтверждена. Для следующего потока "
+                    "можно оформить отдельное продление.",
+                    reply_markup=types.InlineKeyboardMarkup(
+                        inline_keyboard=[
+                            [
+                                types.InlineKeyboardButton(
+                                    text="Оформить продление",
+                                    callback_data="payment:start",
+                                ),
+                            ],
+                            [
+                                types.InlineKeyboardButton(
+                                    text="Главное меню", callback_data="nav:home"
+                                )
+                            ],
+                        ]
+                    ),
                 )
                 await callback.answer()
                 return
@@ -801,25 +837,12 @@ async def payment_refresh_handler(
 
     remote_status = remote.get("status")
     if _payment_validation_error(remote, pending_payment):
-        pending_payment.status = PaymentStatus.FAILED
+        pending_payment.status = PaymentStatus.NEEDS_REVIEW
         await session.commit()
         await responder.answer(
             "Не удалось безопасно сопоставить счёт с вашим профилем. "
-            "Старый счёт закрыт; новый создастся только после подтверждения.",
-            reply_markup=types.InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [
-                        types.InlineKeyboardButton(
-                            text="Создать новый счёт", callback_data="payment:start"
-                        )
-                    ],
-                    [
-                        types.InlineKeyboardButton(
-                            text="← Главное меню", callback_data="nav:home"
-                        )
-                    ],
-                ]
-            ),
+            "Не оплачивайте повторно. Обратитесь к администратору.",
+            reply_markup=back_home_kb(),
         )
         await callback.answer()
         return
@@ -871,6 +894,16 @@ async def payment_refresh_handler(
     conf = remote.get("confirmation", {})
     url = conf.get("confirmation_url")
     if remote_status == "pending" and url:
+        target_flow_id = await resolve_flow_for_payment(session, now)
+        if target_flow_id is None or pending_payment.flow_id != target_flow_id:
+            await responder.answer(
+                "Оплата пока не подтверждена. Набор для этого счёта уже закрыт. "
+                "Не оплачивайте старую ссылку. Если деньги списаны, "
+                "повторите проверку позже или обратитесь к администратору.",
+                reply_markup=back_home_kb(),
+            )
+            await callback.answer()
+            return
         keyboard = types.InlineKeyboardMarkup(
             inline_keyboard=[
                 [types.InlineKeyboardButton(text="💳 Перейти к оплате", url=url)],
@@ -944,6 +977,7 @@ async def access_handler(message: types.Message, session: AsyncSession) -> None:
         )
         return
 
+    await lock_user_by_id(session, user.id)
     existing = await membership_repo.get_membership_by_flow(
         session, user_id=user.id, flow_id=flow.id
     )
@@ -1218,7 +1252,8 @@ async def promo_code_apply_handler(
         )
         return
     now = datetime.now(timezone.utc)
-    if not is_promo_valid(promo, now):
+    existing = await promo_repo.get_user_promo(session, user_id, code)
+    if not is_promo_valid(promo, now, check_capacity=existing is None):
         await state.clear()
         await edit_saved_screen(
             message,
@@ -1228,7 +1263,6 @@ async def promo_code_apply_handler(
         )
         return
 
-    existing = await promo_repo.get_user_promo(session, user_id, code)
     if existing:
         await state.clear()
         await edit_saved_screen(

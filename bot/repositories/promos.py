@@ -53,7 +53,10 @@ async def disable_promo(session: AsyncSession, code: str) -> bool:
 async def add_user_promo(session: AsyncSession, user_id: int, code: str) -> bool:
     normalized_code = code.upper()
     result = await session.execute(
-        select(PromoCode).where(PromoCode.code == normalized_code).with_for_update()
+        select(PromoCode)
+        .where(PromoCode.code == normalized_code)
+        .with_for_update()
+        .execution_options(populate_existing=True)
     )
     promo = result.scalar_one_or_none()
     now = datetime.now(timezone.utc)

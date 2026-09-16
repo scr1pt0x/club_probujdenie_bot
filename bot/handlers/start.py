@@ -1,5 +1,6 @@
 from aiogram import Router, types
 from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.repositories.users import get_or_create_user
@@ -11,8 +12,12 @@ from config import settings
 router = Router()
 
 
-@router.message(Command("start"))
-async def start_handler(message: types.Message, session: AsyncSession) -> None:
+@router.message(Command("start", ignore_case=True))
+@router.message(lambda m: (m.text or "").strip().casefold() in {"start", "старт"})
+async def start_handler(
+    message: types.Message, session: AsyncSession, state: FSMContext
+) -> None:
+    await state.clear()
     is_admin = message.from_user.id in settings.admin_tg_ids
     await get_or_create_user(
         session=session,

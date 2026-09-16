@@ -40,11 +40,10 @@ async def get_mailings_enabled(session: AsyncSession) -> bool:
 
 
 async def get_shop_prices(session: AsyncSession) -> dict[str, int]:
-    intro = await get_setting(session, "shop_intro_price")
-    renewal = await get_setting(session, "shop_renewal_price")
+    effective = await get_effective_settings(session)
     return {
-        "intro": int(intro) if intro is not None else 2990,
-        "renewal": int(renewal) if renewal is not None else 1990,
+        "intro": effective.intro_price_rub,
+        "renewal": effective.renewal_price_rub,
     }
 
 

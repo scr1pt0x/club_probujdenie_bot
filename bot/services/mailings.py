@@ -4,7 +4,7 @@ from datetime import datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from aiogram import Bot
-from sqlalchemy import distinct, func, select
+from sqlalchemy import distinct, exists, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.admin.templates import DEFAULT_TEMPLATES
@@ -19,6 +19,8 @@ from bot.db.models import (
 from bot.repositories import flows as flow_repo
 from bot.repositories.audit_log import add_audit_log, has_action_with_key
 from bot.repositories.message_templates import get_template_by_key
+from bot.services.delivery import claim_attempt, deliver
+from bot.services.entitlements import has_valid_access
 from bot.services.settings import get_mailings_enabled
 from config import settings
 
@@ -27,9 +29,18 @@ logger = logging.getLogger(__name__)
 
 async def _get_active_user_ids(session: AsyncSession, now: datetime) -> list[int]:
     result = await session.execute(
-        select(distinct(Membership.user_id))
-        .where(Membership.status == MembershipStatus.ACTIVE)
-        .where(Membership.access_end_at >= now)
+        select(User.id).where(
+            or_(
+                User.access_exempt.is_(True),
+                exists(
+                    select(Membership.id).where(
+                        Membership.user_id == User.id,
+                        Membership.status == MembershipStatus.ACTIVE,
+                        Membership.grace_end_at >= now,
+                    )
+                ),
+            )
+        )
     )
     return [row[0] for row in result.all()]
 
@@ -47,22 +58,11 @@ async def _get_active_flow_user_ids(
 
 
 async def _get_former_user_ids(session: AsyncSession) -> list[int]:
-    latest_subq = (
-        select(
-            Membership.user_id,
-            func.max(Membership.created_at).label("max_created"),
-        )
-        .group_by(Membership.user_id)
-        .subquery()
-    )
+    active_ids = await _get_active_user_ids(session, datetime.now(timezone.utc))
     result = await session.execute(
-        select(Membership.user_id)
-        .join(
-            latest_subq,
-            (Membership.user_id == latest_subq.c.user_id)
-            & (Membership.created_at == latest_subq.c.max_created),
+        select(distinct(Membership.user_id)).where(
+            Membership.user_id.notin_(active_ids)
         )
-        .where(Membership.status != MembershipStatus.ACTIVE)
     )
     return [row[0] for row in result.all()]
 
@@ -92,26 +92,42 @@ async def _send_bulk(
             return 0
 
     sent = 0
-    for user_id in user_ids:
+    for user_id in sorted(set(user_ids)):
+        if not await get_mailings_enabled(session):
+            await session.commit()
+            return sent
         result = await session.execute(select(User.tg_id).where(User.id == user_id))
         row = result.first()
         if not row:
             continue
         tg_id = row[0]
-        try:
-            await bot.send_message(tg_id, text)
+        if idempotent and mailing_key:
+            if not await claim_attempt(
+                session,
+                "mailing_delivery_attempt",
+                f"{mailing_key}:user:{user_id}",
+                user_id=user_id,
+            ):
+                continue
+        status = await deliver(lambda: bot.send_message(tg_id, text))
+        if status == "sent":
             sent += 1
-        except Exception:
-            # Ошибки Telegram API не должны останавливать рассылку.
-            logger.warning(
-                "Failed to deliver mailing message",
-                extra={"user_id": user_id, "mailing_key": mailing_key},
-                exc_info=True,
+        if mailing_key:
+            await add_audit_log(
+                session,
+                "mailing_delivery_result",
+                {
+                    "key": mailing_key,
+                    "user_id": user_id,
+                    "status": status,
+                },
             )
+            await session.commit()
         await asyncio.sleep(delay_seconds)
 
     if idempotent and mailing_key:
         await add_audit_log(session, "mailing_sent", {"key": mailing_key})
+        await session.commit()
     return sent
 
 
@@ -128,6 +144,8 @@ async def send_flow_mailings(
     tz = ZoneInfo(settings.scheduler_timezone)
     now_utc = datetime.now(timezone.utc)
     enabled = await get_mailings_enabled(session)
+    if not enabled:
+        return 0, 0
     now_local_date = now_utc.astimezone(tz).date()
     flow_start_local_date = flow_start.astimezone(tz).date()
     days_before = (flow_start_local_date - now_local_date).days
@@ -172,9 +190,7 @@ async def send_flow_mailings(
     return sent_active, sent_former
 
 
-async def send_custom_broadcast(
-    session: AsyncSession, bot: Bot, audience: str, text: str
-) -> int:
+async def custom_audience_ids(session: AsyncSession, audience: str) -> list[int]:
     now = datetime.now(timezone.utc)
     if audience == "active":
         user_ids = await _get_active_user_ids(session, now)
@@ -183,14 +199,63 @@ async def send_custom_broadcast(
     elif audience == "current_unpaid":
         user_ids = await _get_current_unpaid_transition_user_ids(session, now)
     elif audience == "all":
-        active_ids = await _get_active_user_ids(session, now)
-        former_ids = await _get_former_user_ids(session)
-        user_ids = list({*active_ids, *former_ids})
+        user_ids = list((await session.execute(select(User.id))).scalars().all())
     else:
-        return 0
-    return await _send_bulk(
-        session, bot, user_ids, text, mailing_key=None, idempotent=False
-    )
+        return []
+    return sorted(set(user_ids))
+
+
+async def send_custom_broadcast(
+    session, bot, *, user_ids, source_chat_id, source_message_id, key
+) -> dict[str, int]:
+    counts = {
+        "sent": 0,
+        "blocked": 0,
+        "failed": 0,
+        "unknown": 0,
+        "rate_limited": 0,
+        "skipped": 0,
+    }
+    for user_id in sorted(set(user_ids)):
+        if not await get_mailings_enabled(session):
+            counts["stopped"] = 1
+            break
+        tg_id = (
+            await session.execute(select(User.tg_id).where(User.id == user_id))
+        ).scalar_one_or_none()
+        if tg_id is None:
+            counts["skipped"] += 1
+            continue
+        if not await claim_attempt(
+            session,
+            "mailing_delivery_attempt",
+            f"{key}:user:{user_id}",
+            user_id=user_id,
+        ):
+            counts["skipped"] += 1
+            continue
+        status = await deliver(
+            lambda: bot.copy_message(
+                chat_id=tg_id,
+                from_chat_id=source_chat_id,
+                message_id=source_message_id,
+            )
+        )
+        counts[status] += 1
+        await add_audit_log(
+            session,
+            "mailing_delivery_result",
+            {
+                "key": key,
+                "user_id": user_id,
+                "status": status,
+            },
+        )
+        await session.commit()
+        await asyncio.sleep(0.05)
+    await add_audit_log(session, "custom_mailing_finished", {"key": key, **counts})
+    await session.commit()
+    return counts
 
 
 async def _get_current_unpaid_transition_user_ids(
@@ -236,9 +301,11 @@ async def send_auto_end_mailings(session: AsyncSession, bot: Bot, now: datetime)
     tz = ZoneInfo(settings.scheduler_timezone)
     now_utc = now.astimezone(timezone.utc)
     enabled = await get_mailings_enabled(session)
+    if not enabled:
+        return 0
     today_local = now_utc.astimezone(tz).date()
-    window_start = datetime.combine(today_local - timedelta(days=7), time.min, tz)
-    window_end = datetime.combine(today_local + timedelta(days=1), time.max, tz)
+    window_start = datetime.combine(today_local, time.min, tz)
+    window_end = datetime.combine(today_local + timedelta(days=7), time.max, tz)
     result = await session.execute(
         select(Flow).where(Flow.end_at >= window_start, Flow.end_at <= window_end)
     )
@@ -327,6 +394,8 @@ async def send_auto_end_mailings(session: AsyncSession, bot: Bot, now: datetime)
 async def send_pay_later_deadline_reminders(
     session: AsyncSession, bot: Bot, now: datetime
 ) -> int:
+    if not await get_mailings_enabled(session):
+        return 0
     tz = ZoneInfo(settings.scheduler_timezone)
     now_utc = now.astimezone(timezone.utc)
     today_local = now_utc.astimezone(tz).date()
@@ -341,7 +410,7 @@ async def send_pay_later_deadline_reminders(
     sent = 0
     for membership in memberships:
         deadline = membership.pay_later_deadline_at
-        if deadline is None:
+        if deadline is None or deadline <= now_utc:
             continue
         deadline_local = deadline.astimezone(tz).date()
         template_key: str | None = None
@@ -357,23 +426,16 @@ async def send_pay_later_deadline_reminders(
         if await has_action_with_key(session, "mailing_sent", key):
             continue
 
-        user = await session.get(User, membership.user_id)
-        if user is None:
-            await add_audit_log(session, "mailing_sent", {"key": key, "count": 0})
+        if await has_valid_access(
+            session,
+            membership.user_id,
+            now_utc,
+            exclude_membership_ids={membership.id},
+        ):
             continue
 
         text = await _get_template_text(session, template_key)
-        try:
-            await bot.send_message(user.tg_id, text)
-            sent += 1
-            await add_audit_log(session, "mailing_sent", {"key": key, "count": 1})
-        except Exception:
-            logger.warning(
-                "Failed to deliver pay-later reminder",
-                extra={"user_id": membership.user_id, "membership_id": membership.id},
-                exc_info=True,
-            )
-            await add_audit_log(session, "mailing_sent", {"key": key, "count": 0})
+        sent += await _send_bulk(session, bot, [membership.user_id], text, key)
 
     logger.info(
         "Pay-later reminders run",

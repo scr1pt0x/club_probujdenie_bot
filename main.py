@@ -3,6 +3,7 @@ import logging
 
 import uvicorn
 from aiogram import Bot, Dispatcher
+from aiogram.fsm.storage.memory import SimpleEventIsolation
 
 from bot.admin.router import router as admin_router
 from bot.db.session import AsyncSessionLocal
@@ -28,7 +29,7 @@ async def main() -> None:
     logging.basicConfig(level=logging.INFO)
 
     bot = Bot(token=settings.bot_token)
-    dp = Dispatcher()
+    dp = Dispatcher(events_isolation=SimpleEventIsolation())
     dp.message.middleware(DbSessionMiddleware())
     dp.callback_query.middleware(DbSessionMiddleware())
     dp.chat_join_request.middleware(DbSessionMiddleware())

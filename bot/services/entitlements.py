@@ -1,7 +1,7 @@
 from collections.abc import Collection
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.db.models import (
@@ -12,6 +12,19 @@ from bot.db.models import (
     PaymentStatus,
     User,
 )
+
+
+async def has_unresolved_payment(session: AsyncSession, user_id: int) -> bool:
+    """Hold automatic removal, but do NOT grant access, until money is reconciled."""
+    result = await session.execute(
+        select(Payment.id)
+        .where(
+            Payment.user_id == user_id,
+            Payment.status.in_([PaymentStatus.PENDING, PaymentStatus.NEEDS_REVIEW]),
+        )
+        .limit(1)
+    )
+    return result.scalar_one_or_none() is not None
 
 
 async def has_valid_access(
@@ -32,7 +45,9 @@ async def has_valid_access(
         select(Membership.id)
         .where(Membership.user_id == user_id)
         .where(Membership.status == MembershipStatus.ACTIVE)
-        .where(Membership.grace_end_at >= now)
+        .where(
+            or_(Membership.grace_end_at >= now, Membership.pay_later_deadline_at > now)
+        )
         .limit(1)
     )
     if exclude_membership_ids:

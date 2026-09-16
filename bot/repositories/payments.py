@@ -8,7 +8,9 @@ async def get_payment_by_external_id(
     session: AsyncSession, external_id: str
 ) -> Payment | None:
     result = await session.execute(
-        select(Payment).where(Payment.external_id == external_id)
+        select(Payment)
+        .where(Payment.external_id == external_id)
+        .execution_options(populate_existing=True)
     )
     return result.scalar_one_or_none()
 
