@@ -5,11 +5,20 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from sqlalchemy import select
 
 from bot.admin.keyboards import back_menu_kb
-from bot.db.models import Flow, Payment, PaymentStatus, User
+from bot.db.models import Flow, Payment, PaymentReceipt, PaymentStatus, User
 from bot.payments.yookassa_adapter import YooKassaAdapter
 from bot.services.payment_reviews import resolve_payment_review
 from bot.ui.formatters import format_local_date
 from bot.ui.navigation import edit_screen
+
+RECEIPT_LABELS = {
+    "pending": "ожидает доставки / повторной проверки",
+    "sending": "доставка начата",
+    "sent": "показано участнице",
+    "unknown": "результат отправки неизвестен — без автоповтора",
+    "blocked": "Telegram запретил отправку",
+    "failed": "нужна ручная проверка доставки",
+}
 
 
 async def payment_reviews_screen(callback, session, section):
@@ -19,6 +28,74 @@ async def payment_reviews_screen(callback, session, section):
     except TelegramAPIError:
         pass
     parts = section.split(":")
+    if len(parts) == 3 and parts[1] == "receipts" and parts[2].isdigit():
+        offset = int(parts[2])
+        entries = list(
+            (
+                await session.execute(
+                    select(PaymentReceipt, Payment, User)
+                    .join(Payment, Payment.id == PaymentReceipt.payment_id)
+                    .join(User, User.id == Payment.user_id)
+                    .order_by(PaymentReceipt.updated_at.desc())
+                    .offset(offset)
+                    .limit(11)
+                )
+            ).all()
+        )
+        lines = ["📨 Доставка подтверждений", ""]
+        rows = []
+        for receipt, payment, user in entries[:10]:
+            who = f"@{user.username}" if user.username else f"ID {user.tg_id}"
+            label = RECEIPT_LABELS.get(receipt.status, receipt.status)
+            lines.append(f"#{payment.id} · {who}: {label}")
+            if receipt.error_code:
+                lines.append(f"Причина: {receipt.error_code}")
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        text=f"Платёж #{payment.id}",
+                        callback_data=f"admin:payments:card:{payment.id}",
+                    )
+                ]
+            )
+        if not entries:
+            lines.append(
+                "Новых подтверждений пока нет. "
+                "Старые оплаты автоматически не рассылаются."
+            )
+        if offset:
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        text="← Предыдущие",
+                        callback_data=f"admin:payments:receipts:{max(0, offset - 10)}",
+                    )
+                ]
+            )
+        if len(entries) > 10:
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        text="Следующие →",
+                        callback_data=f"admin:payments:receipts:{offset + 10}",
+                    )
+                ]
+            )
+        lines.extend(
+            [
+                "",
+                "При неизвестном результате уточните у участницы, "
+                "видит ли она подтверждение. Повторно платить не нужно: "
+                "доступ и ссылки открываются в разделе «Оплата».",
+            ]
+        )
+        rows.extend(back_menu_kb("admin:payments").inline_keyboard)
+        await edit_screen(
+            callback.message,
+            "\n".join(lines),
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+        )
+        return
     if len(parts) == 1 or (len(parts) == 3 and parts[1] == "page"):
         offset = int(parts[2]) if len(parts) == 3 and parts[2].isdigit() else 0
         payments = list(
@@ -59,6 +136,14 @@ async def payment_reviews_screen(callback, session, section):
                     )
                 ]
             )
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text="📨 Доставка подтверждений",
+                    callback_data="admin:payments:receipts:0",
+                )
+            ]
+        )
         rows.extend(back_menu_kb("admin:menu").inline_keyboard)
         await edit_screen(
             callback.message,

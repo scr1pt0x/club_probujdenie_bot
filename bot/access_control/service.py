@@ -17,6 +17,8 @@ class AccessChangeResult:
     channel_link: str | None = None
     group_link: str | None = None
     protected: bool = False
+    channel_present: bool = False
+    group_present: bool = False
 
     @property
     def successful(self) -> bool:
@@ -84,6 +86,41 @@ async def grant_access(bot: Bot, tg_id: int) -> AccessChangeResult:
         group_ok=group_unbanned and group_link is not None,
         channel_link=channel_link,
         group_link=group_link,
+    )
+
+
+async def prepare_paid_access(bot: Bot, tg_id: int) -> AccessChangeResult:
+    """Only offer entry to missing chats; never disturb an existing member."""
+
+    async def prepare(chat_id):
+        try:
+            member = await bot.get_chat_member(chat_id=chat_id, user_id=tg_id)
+            present = member.status in {"member", "administrator", "creator"} or (
+                member.status == "restricted" and member.is_member
+            )
+            if present:
+                return True, None, True
+            if not await _safe_unban(bot, chat_id, tg_id):
+                return False, None, False
+            link = await _safe_invite_link(bot, chat_id, tg_id)
+            return link is not None, link, False
+        except (TelegramAPIError, TimeoutError, OSError):
+            logger.warning("Payment access lookup unavailable: chat=%s", chat_id)
+            return False, None, False
+
+    channel_ok, channel_link, channel_present = await prepare(
+        settings.primary_channel_id
+    )
+    group_ok, group_link, group_present = await prepare(
+        settings.secondary_discussion_id
+    )
+    return AccessChangeResult(
+        channel_ok=channel_ok,
+        group_ok=group_ok,
+        channel_link=channel_link,
+        group_link=group_link,
+        channel_present=channel_present,
+        group_present=group_present,
     )
 
 

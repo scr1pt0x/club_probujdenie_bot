@@ -4,6 +4,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.db.models import PromoCode, UserPromo
+from bot.repositories.users import lock_user_by_id
 
 
 async def get_promo_by_code(session: AsyncSession, code: str) -> PromoCode | None:
@@ -51,6 +52,8 @@ async def disable_promo(session: AsyncSession, code: str) -> bool:
 
 
 async def add_user_promo(session: AsyncSession, user_id: int, code: str) -> bool:
+    if await lock_user_by_id(session, user_id) is None:
+        return False
     normalized_code = code.upper()
     result = await session.execute(
         select(PromoCode)
@@ -102,4 +105,5 @@ async def get_user_promo(
 
 
 async def delete_user_promos(session: AsyncSession, user_id: int) -> None:
+    await lock_user_by_id(session, user_id)
     await session.execute(delete(UserPromo).where(UserPromo.user_id == user_id))

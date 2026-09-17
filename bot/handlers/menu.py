@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bot.access_control.service import grant_access
 from bot.db.models import (
     Flow,
+    FreePromoUse,
     Membership,
     MembershipStatus,
     Payment,
@@ -35,12 +36,13 @@ from bot.services.memberships import (
     compute_grace_end,
     evaluate_pay_later,
 )
+from bot.services.payment_receipts import deliver_receipt
 from bot.services.payments import (
     calculate_price_rub,
     confirm_payment,
     resolve_flow_for_payment,
 )
-from bot.services.promos import is_promo_valid
+from bot.services.promos import is_promo_valid, record_free_promo_use
 from bot.services.settings import (
     get_effective_settings,
     get_shop_free_label,
@@ -185,17 +187,47 @@ async def _send_paid_access_links(
             reply_markup=back_home_kb(),
         )
         return
-    links = await grant_access(responder.bot, tg_id)
-    await session.commit()
-    kb = access_links_kb(links.channel_link, links.group_link)
-    if kb is None:
-        await responder.answer("Оплата уже подтверждена. Доступ активирован.")
-        return
-    await responder.answer(
-        "Оплата уже подтверждена. Доступ активирован.\n"
-        "Нажмите кнопки ниже и отправьте заявку на вступление.",
-        reply_markup=kb,
+    payment = await _find_paid_payment_with_active_flow(
+        session, user.id, datetime.now(timezone.utc)
     )
+    if payment is None:
+        # A manual extension may outlive the flow's original end date.
+        payment = (
+            await session.scalars(
+                select(Payment)
+                .join(Membership, Membership.last_payment_id == Payment.id)
+                .where(
+                    Payment.user_id == user.id,
+                    Payment.status == PaymentStatus.PAID,
+                    Membership.status == MembershipStatus.ACTIVE,
+                )
+                .order_by(Membership.access_end_at.desc())
+                .limit(1)
+            )
+        ).first()
+    if payment is None:
+        await session.commit()
+        await responder.answer(
+            "Нет действующей оплаты потока. Проверьте «Мой доступ» "
+            "или обратитесь к администратору.",
+            reply_markup=back_home_kb(),
+        )
+        return
+    await session.commit()
+    await deliver_receipt(session, responder.bot, payment.id, responder=responder)
+
+
+@router.callback_query(lambda c: c.data == "payment:access")
+async def payment_access_handler(
+    callback: types.CallbackQuery, session: AsyncSession
+) -> None:
+    # Explicit recovery never creates an invoice or changes a payment status.
+    await _send_paid_access_links(
+        session,
+        ScreenResponder(callback.message, edit_existing=True),
+        callback.from_user.id,
+    )
+    await callback.answer()
 
 
 async def _send_personal_payment_link(
@@ -311,15 +343,13 @@ async def _send_personal_payment_link(
                         notify_user=False,
                     )
                     await session.commit()
-                    kb = access_links_kb(
-                        links.channel_link if links else None,
-                        links.group_link if links else None,
-                    )
-                    text = await get_text(
+                    await deliver_receipt(
                         session,
-                        "payment_success" if kb else "payment_success_no_links",
+                        responder.bot,
+                        existing_pending.id,
+                        responder=responder,
+                        access=links,
                     )
-                    await responder.answer(text, reply_markup=kb or back_home_kb())
                     return
                 if remote_status in ("canceled", "expired"):
                     existing_pending.status = PaymentStatus.FAILED
@@ -426,18 +456,22 @@ async def _send_personal_payment_link(
         )
         session.add(payment)
         await session.flush()
+        if not await record_free_promo_use(session, payment):
+            await session.rollback()
+            await responder.answer(
+                "Бесплатный промокод уже использован для другого потока "
+                "или срок его действия закончился. Для нового потока "
+                "снова откройте раздел «Оплата» — бот покажет актуальную цену.",
+                reply_markup=back_home_kb(),
+            )
+            return
         links = await confirm_payment(
             session, responder.bot, payment, paid_at=now, notify_user=False
         )
         await session.commit()
-        kb = access_links_kb(
-            links.channel_link if links else None,
-            links.group_link if links else None,
+        await deliver_receipt(
+            session, responder.bot, payment.id, responder=responder, access=links
         )
-        text = await get_text(
-            session, "payment_success" if kb else "payment_success_no_links"
-        )
-        await responder.answer(text, reply_markup=kb or back_home_kb())
         return
 
     payment = Payment(
@@ -887,14 +921,13 @@ async def payment_refresh_handler(
             notify_user=False,
         )
         await session.commit()
-        kb = access_links_kb(
-            links.channel_link if links else None,
-            links.group_link if links else None,
+        await deliver_receipt(
+            session,
+            responder.bot,
+            pending_payment.id,
+            responder=responder,
+            access=links,
         )
-        text = await get_text(
-            session, "payment_success" if kb else "payment_success_no_links"
-        )
-        await responder.answer(text, reply_markup=kb or back_home_kb())
         await callback.answer("Оплата подтверждена")
         return
 
@@ -1310,6 +1343,17 @@ async def promo_code_apply_handler(
         )
         return
 
+    if promo.kind == "free" and await session.get(FreePromoUse, (user_id, code)):
+        await state.clear()
+        await edit_saved_screen(
+            message,
+            screen_message_id,
+            "Этот бесплатный промокод уже использован для одного потока. "
+            "Выданное участие сохранено. Продление и текущий доступ — "
+            "в разделе «Оплата».",
+            reply_markup=back_home_kb(),
+        )
+        return
     if existing:
         await state.clear()
         await edit_saved_screen(

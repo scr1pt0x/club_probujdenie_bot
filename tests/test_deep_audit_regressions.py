@@ -15,7 +15,7 @@ from test_postgres_safety import URL, database_scenario
 
 from bot.access_control.service import AccessChangeResult
 from bot.admin import router as admin
-from bot.db.models import Flow, Membership, Payment, User
+from bot.db.models import Flow, Membership, Payment, PaymentReceipt, User
 from bot.repositories.audit_log import has_action_with_key
 from bot.repositories.memberships import expire_all_active_memberships
 from bot.services import mailings, payments
@@ -554,7 +554,10 @@ def test_payment_review_resolves_only_verified_orders(monkeypatch, outcome):
                 "pending": "pending",
             }.get(outcome, "needs_review")
             assert payment.status == expected, result
-            assert grant.await_count == int(outcome == "paid")
+            # Confirmation commits a delivery intent; Telegram runs afterwards.
+            grant.assert_not_awaited()
+            receipt = await session.get(PaymentReceipt, ids.payment)
+            assert (receipt is not None) == (outcome in {"paid", "suspended"})
             if outcome in {"paid", "suspended"}:
                 # Stale second admin click cannot rebind, regrant or notify twice.
                 await resolve_payment_review(

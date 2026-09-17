@@ -4,6 +4,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from bot.db.session import AsyncSessionLocal
 from bot.scheduler import jobs
+from bot.services.payment_receipts import process_receipts
 from config import settings
 
 logger = logging.getLogger(__name__)
@@ -32,6 +33,18 @@ def setup_scheduler(bot, payment_adapter=None) -> AsyncIOScheduler:
         await _with_session(
             lambda s: jobs.check_pending_payments(s, bot, payment_adapter)
         )
+
+    async def _payment_receipts_job():
+        await _with_session(lambda s: process_receipts(s, bot))
+
+    scheduler.add_job(
+        _payment_receipts_job,
+        "interval",
+        seconds=60,
+        id="payment_receipts",
+        replace_existing=True,
+        max_instances=1,
+    )
 
     if settings.revoke_jobs_enabled:
         scheduler.add_job(
@@ -69,9 +82,10 @@ def setup_scheduler(bot, payment_adapter=None) -> AsyncIOScheduler:
         scheduler.add_job(
             _check_payments_job,
             "interval",
-            minutes=10,
+            minutes=1,
             id="check_payments",
             replace_existing=True,
+            max_instances=1,
         )
 
     return scheduler

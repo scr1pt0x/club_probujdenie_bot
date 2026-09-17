@@ -175,6 +175,23 @@ class Payment(Base):
     flow: Mapped[Optional["Flow"]] = relationship(back_populates="payments")
 
 
+class PaymentReceipt(Base):
+    """Only newly confirmed payments are queued; no historical backfill."""
+
+    __tablename__ = "payment_receipts"
+    payment_id: Mapped[int] = mapped_column(ForeignKey("payments.id"), primary_key=True)
+    status: Mapped[str] = mapped_column(String(16), default="pending")
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    available_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow
+    )
+    message_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    error_code: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+
+
 class PromoCode(Base):
     __tablename__ = "promo_codes"
 
@@ -206,6 +223,17 @@ class UserPromo(Base):
     applied_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow
     )
+
+
+class FreePromoUse(Base):
+    """A redemption survives clearing/re-entering the user's selected promo."""
+
+    __tablename__ = "free_promo_uses"
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), primary_key=True)
+    code: Mapped[str] = mapped_column(ForeignKey("promo_codes.code"), primary_key=True)
+    flow_id: Mapped[int] = mapped_column(ForeignKey("flows.id"))
+    payment_id: Mapped[int] = mapped_column(ForeignKey("payments.id"))
+    used_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class MessageTemplate(Base):

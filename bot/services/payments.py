@@ -4,39 +4,20 @@ from datetime import datetime, timezone
 from aiogram import Bot, types
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bot.access_control.service import AccessChangeResult, grant_access
+from bot.access_control.service import AccessChangeResult
+from bot.access_control.service import prepare_paid_access as grant_access
 from bot.db.models import Payment, PaymentStatus
 from bot.repositories import flows as flow_repo
 from bot.repositories import memberships as membership_repo
 from bot.repositories import users as user_repo
 from bot.repositories.audit_log import add_audit_log, has_action_with_key
 from bot.services import memberships as membership_service
+from bot.services.payment_receipts import queue_receipt
 from bot.services.promos import apply_promo_to_price
 from bot.services.settings import get_effective_settings
 from bot.services.texts import get_text
-from bot.ui.keyboards import access_links_kb
 
 logger = logging.getLogger(__name__)
-
-
-async def _notify_success_with_links_fallback(
-    session: AsyncSession,
-    bot: Bot,
-    user_id: int,
-    channel_link: str | None,
-    group_link: str | None,
-    dedupe_key: str | None = None,
-) -> None:
-    kb = access_links_kb(channel_link, group_link)
-    template_key = "payment_success" if kb is not None else "payment_success_no_links"
-    await notify_payment_status(
-        session,
-        bot,
-        user_id,
-        template_key,
-        kb,
-        dedupe_key=dedupe_key,
-    )
 
 
 async def calculate_price_rub(
@@ -126,16 +107,11 @@ async def confirm_payment(
     # access. Whichever decision starts second must see the first one's commit.
     user = await user_repo.lock_user_by_id(session, payment.user_id)
     if payment.status == PaymentStatus.PAID:
+        if notify_user:
+            await queue_receipt(session, payment.id)
+            return None
         if user and (user.access_exempt or not user.access_suspended):
             links = await grant_access(bot, user.tg_id)
-            if notify_user:
-                await _notify_success_with_links_fallback(
-                    session,
-                    bot,
-                    payment.user_id,
-                    links.channel_link,
-                    links.group_link,
-                )
             return links
         return None
 
@@ -193,19 +169,12 @@ async def confirm_payment(
         payment=payment,
     )
 
-    links = None
-    if user and (user.access_exempt or not user.access_suspended):
-        links = await grant_access(bot, user.tg_id)
-        if notify_user:
-            await _notify_success_with_links_fallback(
-                session,
-                bot,
-                payment.user_id,
-                links.channel_link,
-                links.group_link,
-                dedupe_key=f"payment:{payment.id}:payment_success",
-            )
     if membership.pay_later_deadline_at:
         membership.pay_later_deadline_at = None
         membership.pay_later_used_at = None
-    return links
+    # Delivery intent commits atomically with PAID and the membership. A worker
+    # can recover after a failed menu render/restart without reprocessing money.
+    await queue_receipt(session, payment.id)
+    if not notify_user and user and (user.access_exempt or not user.access_suspended):
+        return await grant_access(bot, user.tg_id)
+    return None

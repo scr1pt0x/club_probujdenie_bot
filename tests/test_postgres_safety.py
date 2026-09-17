@@ -265,6 +265,7 @@ def test_audiences_do_not_count_current_member_as_former():
 
 def test_verified_payment_duplicate_webhooks_join_and_expiry(monkeypatch):
     from bot.handlers import join_requests
+    from bot.services.payment_receipts import process_receipts
     from bot.webhooks import app as webhooks
     from config import settings
 
@@ -288,11 +289,12 @@ def test_verified_payment_duplicate_webhooks_join_and_expiry(monkeypatch):
             lambda: SimpleNamespace(get_payment=AsyncMock(return_value=remote)),
         )
         bot = SimpleNamespace(
+            get_chat_member=AsyncMock(return_value=SimpleNamespace(status="left")),
             unban_chat_member=AsyncMock(),
             create_chat_invite_link=AsyncMock(
                 return_value=SimpleNamespace(invite_link="https://t.me/+QA")
             ),
-            send_message=AsyncMock(),
+            send_message=AsyncMock(return_value=SimpleNamespace(message_id=77)),
             ban_chat_member=AsyncMock(),
             approve_chat_join_request=AsyncMock(),
             decline_chat_join_request=AsyncMock(),
@@ -306,7 +308,10 @@ def test_verified_payment_duplicate_webhooks_join_and_expiry(monkeypatch):
                 *[client.post("/api/yookassa/webhook", json=payload) for _ in range(2)]
             )
         assert [r.status_code for r in responses] == [200, 200]
+        bot.send_message.assert_not_awaited()
         async with sessions() as session:
+            await process_receipts(session, bot)
+            await process_receipts(session, bot)
             payment = await session.get(Payment, ids.payment)
             member = await session.get(Membership, ids.member)
             assert payment.status == "paid"
