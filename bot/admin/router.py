@@ -608,7 +608,8 @@ async def admin_section(
             await state.set_data({"audience": audience})
             await edit_screen(
                 callback.message,
-                "Пришлите текст, фото или видео с подписью одним сообщением. "
+                "Пришлите текст (в том числе с расширенным оформлением), "
+                "фото, видео или документ одним сообщением. "
                 "Сначала покажу предпросмотр; отправка — только после подтверждения.",
                 reply_markup=back_menu_kb("admin:mailings"),
             )
@@ -1488,9 +1489,18 @@ async def custom_mailing_text_handler(
             "Для этой рассылки пришлите одно фото или видео, без альбома."
         )
         return
-    if not (message.text or message.photo or message.video or message.document):
+    # Rich messages have no top-level text/caption, but copyMessage preserves
+    # their blocks, formatting and media just like an ordinary message.
+    if not (
+        message.text
+        or message.rich_message
+        or message.photo
+        or message.video
+        or message.document
+    ):
         await message.answer(
-            "Поддерживаются текст, фото, видео и документ. "
+            "Поддерживаются текст с обычным или расширенным оформлением, "
+            "фото, видео и документ. "
             "Пришлите один из этих вариантов или нажмите «Назад»."
         )
         return

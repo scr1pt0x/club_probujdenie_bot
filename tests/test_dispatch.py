@@ -74,7 +74,7 @@ def test_start_is_dispatched_and_clears_abandoned_admin_state(monkeypatch, value
     asyncio.run(scenario())
 
 
-@pytest.mark.parametrize("kind", ["text", "photo", "photo_without_caption"])
+@pytest.mark.parametrize("kind", ["text", "photo", "photo_without_caption", "rich"])
 def test_mailing_text_or_caption_reaches_preview_without_sending(monkeypatch, kind):
     async def scenario():
         bot = Bot("123:TEST")
@@ -111,6 +111,17 @@ def test_mailing_text_or_caption_reaches_preview_without_sending(monkeypatch, ki
                 "caption": "Набор открыт" if kind == "photo" else None,
             }
         )
+        if kind == "rich":
+            kwargs = {
+                "rich_message": {
+                    "blocks": [
+                        {
+                            "type": "paragraph",
+                            "text": {"type": "bold", "text": "Набор открыт 🌿"},
+                        }
+                    ]
+                }
+            }
         await admin.router.propagate_event(
             "message",
             message(bot, **kwargs),
@@ -221,6 +232,29 @@ def test_whole_dispatcher_admin_text_flow_matches_screenshot(monkeypatch):
         )
         assert await state.get_state() == admin.CustomMailingState.confirming.state
         assert copied.await_count == 1
+        assert "Получателей: 2" in replies[-1].text
+        # The same visually textual announcement can arrive as rich_message.
+        # Exercise the entire production router chain, not just the admin handler.
+        await dp.feed_update(
+            bot, Update(update_id=3, callback_query=callback), session=session
+        )
+        await dp.feed_update(
+            bot,
+            Update(
+                update_id=4,
+                message=message(
+                    bot,
+                    rich_message={
+                        "blocks": [
+                            {"type": "paragraph", "text": "Набор на 49 поток 🌿"}
+                        ]
+                    },
+                ),
+            ),
+            session=session,
+        )
+        assert await state.get_state() == admin.CustomMailingState.confirming.state
+        assert copied.await_count == 2
         assert "Получателей: 2" in replies[-1].text
         await bot.session.close()
         await dp.fsm.close()
